@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find C:UsersquinellaDesktoppropaint_v2appsrcmainjavacompropaintapp -type f -name *.kt)",
+      "Bash(xargs wc:*)",
+      "Bash(find /c/Users/quinella/Desktop/propaint_v2 -name *.kt -type f)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(ls \"C:\\\\Users\\\\quinella\\\\Desktop\\\\propaint_v2\\\\gradlew\"*)",
+      "Bash(ls \"C:\\\\Users\\\\quinella\\\\Desktop\\\\propaint_v2\"/*.bat)",
+      "Bash(ls \"C:\\\\Users\\\\quinella\\\\Desktop\\\\propaint_v2\"/*.gradle*)",
+      "Bash(gradle assembleDebug)",
+      "Bash(cmd.exe /c \"gradlew.bat assembleDebug\")",
+      "Bash(grep -E \"\\\\.kt$\")",
+      "Bash(ls C:/Users/quinella/Desktop/propaint_v2/gradlew*)",
+      "Bash(ls C:/Users/quinella/Desktop/propaint_v2/*.bat)",
+      "Bash(xargs ls:*)",
+      "Bash(grep:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(./gradlew compileDebugKotlin)",
+      "Bash(ls:*)"
+    ]
+  }
+}
