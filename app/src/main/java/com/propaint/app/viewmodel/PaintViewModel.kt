@@ -359,9 +359,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val opacitySupported = type.supportsOpacity
         val densitySupported = type.supportsDensity
 
-        // ブラシ種別ごとの smudge / blur / indirect パラメータ
-        val smudge: Float
-        val resmudge: Int
+        // ブラシ種別ごとのパラメータ
         val isBlur: Boolean
         val blurStr: Float
         val indirect: Boolean
@@ -372,38 +370,39 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
         when (type) {
             BrushType.Fude -> {
-                // 筆: キャンバス色と描画色を混合 (smudge=0.6)
-                smudge = 0.6f; resmudge = 0; isBlur = false; blurStr = 0f
-                indirect = true; waterCont = 0f; colStretch = _colorStretch.value
+                // 筆: content に直接描画+ぼかし (AVERAGING フィルタ)。
+                // indirect=false: sublayer→merge の二重適用を防ぎ安定した混色を実現。
+                isBlur = false; blurStr = 0f
+                indirect = false; waterCont = 0f; colStretch = _colorStretch.value
                 subFilter = BrushConfig.SUBLAYER_FILTER_AVERAGING
                 blurPressThreshold = _blurPressureThreshold.value
             }
             BrushType.Watercolor -> {
-                // 水彩: 高い混色率 + 水分効果
-                smudge = 0.4f; resmudge = 0; isBlur = false; blurStr = 0f
-                indirect = true; waterCont = _waterContent.value; colStretch = _colorStretch.value
+                // 水彩: content に直接描画+ぼかし (BOX_BLUR フィルタ)。
+                // indirect=false: 筆と同様に安定した混色を実現。
+                isBlur = false; blurStr = 0f
+                indirect = false; waterCont = _waterContent.value; colStretch = _colorStretch.value
                 subFilter = BrushConfig.SUBLAYER_FILTER_BOX_BLUR
                 blurPressThreshold = _blurPressureThreshold.value
             }
             BrushType.Blur -> {
-                // ぼかし: smudge=1.0 でキャンバス色のみ使用
-                smudge = 1f; resmudge = 0; isBlur = true; blurStr = _blurStrength.value
+                isBlur = true; blurStr = _blurStrength.value
                 indirect = false; waterCont = 0f; colStretch = 0f
             }
             BrushType.Airbrush -> {
-                smudge = 0f; resmudge = 0; isBlur = false; blurStr = 0f
+                isBlur = false; blurStr = 0f
                 indirect = true; waterCont = 0f; colStretch = 0f
             }
             BrushType.Eraser -> {
-                smudge = 0f; resmudge = 0; isBlur = false; blurStr = 0f
+                isBlur = false; blurStr = 0f
                 indirect = false; waterCont = 0f; colStretch = 0f
             }
             BrushType.Marker -> {
-                smudge = 0f; resmudge = 0; isBlur = false; blurStr = 0f
+                isBlur = false; blurStr = 0f
                 indirect = false; waterCont = 0f; colStretch = 0f
             }
             else -> { // Pencil
-                smudge = 0f; resmudge = 0; isBlur = false; blurStr = 0f
+                isBlur = false; blurStr = 0f
                 indirect = true; waterCont = 0f; colStretch = 0f
             }
         }
@@ -418,8 +417,6 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             isEraser = type == BrushType.Eraser,
             isMarker = type == BrushType.Marker,
             isBlur = isBlur,
-            smudge = smudge,
-            resmudge = resmudge,
             blurStrength = blurStr,
             indirect = indirect,
             pressureSizeEnabled = _pressureSizeEnabled.value,

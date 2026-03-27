@@ -17,7 +17,8 @@
       "Bash(grep:*)",
       "mcp__ide__getDiagnostics",
       "Bash(./gradlew compileDebugKotlin)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(find /c/Users/quinella/Desktop/propaint_v2 -type f \\\\\\(-name *brush* -o -name *preset* \\\\\\) -iname *.json -o -name *.xml)"
     ]
   }
 }

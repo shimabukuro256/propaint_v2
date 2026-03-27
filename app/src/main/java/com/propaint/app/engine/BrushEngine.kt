@@ -4,17 +4,10 @@ import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * ブラシエンジン: Drawpile brush_engine.c 準拠の完全書き直し。
+ * ブラシエンジン。
  *
- * v1/旧v2 の致命的バグを修正:
- *  ・ぼかしツールに描画色が乗る → blur は smudge=1.0 でキャンバス色のみ使用
- *  ・Fude/Watercolor が混色しない → smudge サンプリングを CPU タイルから実行
- *  ・全ブラシが同じ描画パスを通る → Direct/Indirect を種別ごとに区別
- *
- * Drawpile のダブ色決定フロー:
- *   1. update_classic_smudge(): resmudge 距離ごとにキャンバスから色サンプリング
- *   2. blend_classic_color():   smudge_color × smudge + brush_color × (1-smudge)
- *   3. 合成した色でダブマスクをタイルに適用
+ * ダブ色決定 → ダブ配置 → サブレイヤーフィルタ(筆/水彩) の順で処理。
+ * 筆/水彩の混色は blurAreaOnSurface のぼかしフィルタで実現する。
  */
 class BrushEngine(
     private val dirtyTracker: DirtyTileTracker,
@@ -24,11 +17,6 @@ class BrushEngine(
     private var distToNextDab = 0f
     private val pointBuffer = ArrayList<StrokePoint>(512)
 
-    // Drawpile の smudge_color: キャンバスからサンプリングした色 (premultiplied)
-    private var smudgeColor: Int = 0
-    // resmudge: ダブ何個ごとに再サンプリングするか (Drawpile cb->resmudge)
-    private var smudgeDabCount: Int = 0
-
     // ストローク開始時のレイヤー ID (レイヤー切替バグ修正)
     var strokeLayerId: Int = -1
         private set
@@ -37,6 +25,9 @@ class BrushEngine(
     private var blurSrc = IntArray(0)
     private var blurTmp = IntArray(0)
     private var blurDst = IntArray(0)
+    private var blurSubSrc = IntArray(0)  // サブレイヤー単独ブラー用
+    private var blurSubDst = IntArray(0)
+    private var blurSubTmp = IntArray(0)
 
     // ── 手振れ補正 (リアルタイム EMA フィルタ) ─────────────────────
     // 指数移動平均: 入力座標と筆圧をリアルタイムに平滑化。
@@ -58,8 +49,6 @@ class BrushEngine(
         require(layerId > 0) { "strokeLayerId must be positive, got $layerId" }
         distToNextDab = 0f
         pointBuffer.clear()
-        smudgeColor = 0
-        smudgeDabCount = 0
         strokeLayerId = layerId
         stabInitialized = false
         PaintDebug.d(PaintDebug.Brush) { "[beginStroke] layerId=$layerId" }
@@ -69,8 +58,7 @@ class BrushEngine(
      * ストロークにポイントを追加し、ダブを配置する。
      *
      * @param drawTarget  描画先サーフェス (Indirect→sublayer, Direct→layer.content)
-     * @param sampleSource smudge/blur サンプリング元 (常に layer.content)
-     *                     ※ sublayer ではなく本体レイヤーから読む (Drawpile 準拠)
+     * @param sampleSource blur サンプリング元 (常に layer.content)
      */
     fun addPoint(
         point: StrokePoint,
@@ -147,7 +135,6 @@ class BrushEngine(
         brush: BrushConfig,
     ) {
         if (points.size < 2) return
-        smudgeColor = 0; smudgeDabCount = 0
         renderSegments(points, 0, 0f, drawTarget, sampleSource, brush, applyExitTaper = true)
     }
 
@@ -194,9 +181,6 @@ class BrushEngine(
             else -> PixelOps.BLEND_NORMAL
         }
 
-        // resmudge 間隔 (Drawpile cb->resmudge: 0=毎ダブ)
-        val resmudge = brush.resmudge
-
         var dist = initialDist
 
         for (i in fromSegIdx until pts.size - 1) {
@@ -240,47 +224,22 @@ class BrushEngine(
                 val finalRad = pRad * taper
                 if (finalRad < 0.25f) { dist += stepDist; continue }
 
-                // ── Smudge サンプリング (Drawpile update_classic_smudge) ────
-                // smudge > 0 のブラシ: resmudge 間隔でキャンバスから色を取得
-                if (brush.smudge > 0f) {
-                    smudgeDabCount++
-                    if (smudgeDabCount > resmudge) {
-                        val sampledColor = sampleSource.sampleColorAt(
-                            px.toInt(), py.toInt(),
-                            maxOf(2, (finalRad * 0.8f).toInt()),
-                        )
-                        // smudge_color を更新 (Drawpile: 新サンプルで漸進的に置換)
-                        if (smudgeColor == 0) {
-                            smudgeColor = sampledColor
-                        } else {
-                            smudgeColor = PixelOps.lerpColor(smudgeColor, sampledColor, brush.smudge)
-                        }
-                        smudgeDabCount = 0
-                    }
-                }
-
                 // ── ぼかし筆圧判定 ──────────────────────────────────────────
                 val belowBlurThreshold = brush.blurPressureThreshold > 0f &&
                     pressure < brush.blurPressureThreshold
 
-                // ── ダブ色決定 (Drawpile blend_classic_color) ────────────────
+                // ── ダブ色決定 ────────────────────────────────────────────
                 val dabColor: Int = when {
-                    // Blur: smudge=1.0 → キャンバス色のみ (描画色を一切使わない)
+                    // Blur: キャンバス色をサンプリング
                     brush.isBlur -> {
                         sampleSource.sampleColorAt(
                             px.toInt(), py.toInt(),
                             maxOf(2, (finalRad * brush.blurStrength).toInt()),
                         )
                     }
-                    // ぼかし筆圧閾値以下 + smudge: スマッジ色のみ (着色なし)
-                    belowBlurThreshold && brush.smudge > 0f && smudgeColor != 0 -> smudgeColor
-                    // ぼかし筆圧閾値以下 + smudge未初期化: 描画スキップ
+                    // ぼかし筆圧閾値以下: ダブ無し (フィルタのみ適用)
                     belowBlurThreshold -> 0
-                    // Smudge系 (Fude/Watercolor): キャンバス色と描画色を混合
-                    brush.smudge > 0f && smudgeColor != 0 -> {
-                        PixelOps.lerpColor(brush.colorPremul, smudgeColor, brush.smudge)
-                    }
-                    // 通常ブラシ: 描画色そのまま
+                    // 通常: 描画色そのまま (混色は blurAreaOnSurface で行う)
                     else -> brush.colorPremul
                 }
 
@@ -357,32 +316,32 @@ class BrushEngine(
         }
     }
 
-    // ── サブレイヤー局所ぼかし (筆/水彩 per-dab フィルタ) ────────────
+    // ── 局所ぼかし (筆/水彩 per-dab フィルタ) ────────────────────────
 
     /**
-     * サブレイヤー+レイヤー内容の合成をぼかし、結果をサブレイヤーに書き戻す。
+     * ダブ配置後にダブ周辺を局所ぼかしし、既存色とストローク色を混色する。
      *
-     * ぼかし入力: sublayer SrcOver content (キャンバス既存色+ストローク色)
-     * ぼかし出力: サブレイヤーのみに書き戻し
+     * ■ Direct モード (drawTarget === sampleSource):
+     *   content を直接読み取り → ぼかし → 円形フォールオフ付きで content に書き戻し。
+     *   sublayer を介さないため逆合成 (unComposite) は不要。
+     *   シンプルかつ安定した混色を実現。
      *
-     * endStroke で sublayer が content に SrcOver 合成されるため、
-     * サブレイヤーに書く値は「ぼかし結果そのもの」とする。
-     * (sublayer の alpha が高い領域では content は透過で隠れる)
+     * ■ Indirect モード (drawTarget !== sampleSource):
+     *   sublayer + content の合成をぼかし、sublayer に書き戻す従来方式。
      *
      * O(n) per pixel の分離ボックスブラー + 円形フォールオフ。
-     *
      * - AVERAGING: 2パス (三角カーネル近似 = 滑らかな混色)
      * - BOX_BLUR: 1パス (にじみ効果)
      */
     private fun blurAreaOnSurface(
-        sublayer: TiledSurface, content: TiledSurface,
+        drawTarget: TiledSurface, sampleSource: TiledSurface,
         cx: Int, cy: Int, radius: Int, filterType: Int,
     ) {
         val safeRadius = radius.coerceIn(1, 60)
         val x0 = maxOf(0, cx - safeRadius)
         val y0 = maxOf(0, cy - safeRadius)
-        val x1 = minOf(sublayer.width - 1, cx + safeRadius)
-        val y1 = minOf(sublayer.height - 1, cy + safeRadius)
+        val x1 = minOf(drawTarget.width - 1, cx + safeRadius)
+        val y1 = minOf(drawTarget.height - 1, cy + safeRadius)
         if (x0 > x1 || y0 > y1) return
 
         val w = x1 - x0 + 1
@@ -394,29 +353,85 @@ class BrushEngine(
             blurSrc = IntArray(size); blurTmp = IntArray(size); blurDst = IntArray(size)
         }
 
-        // ぼかし入力: サブレイヤー SrcOver レイヤー内容 (合成)
-        // → キャンバスに既に描かれたピクセルも混色対象に入る
-        for (ly in 0 until h) for (lx in 0 until w) {
-            val px = x0 + lx; val py = y0 + ly
-            val subPx = sublayer.getPixelAt(px, py)
-            val contPx = content.getPixelAt(px, py)
-            blurSrc[ly * w + lx] = PixelOps.blendSrcOver(contPx, subPx)
-        }
-
-        // パス数: 筆=2パス (三角カーネル近似), 水彩=1パス
         val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
         val kr = maxOf(1, safeRadius / 3)
 
-        // 分離ボックスブラー
+        // ── Direct モード: content を直接ぼかし ──────────────────────
+        if (drawTarget === sampleSource) {
+            // 入力: content ピクセルをそのまま読み取り
+            for (ly in 0 until h) for (lx in 0 until w) {
+                blurSrc[ly * w + lx] = drawTarget.getPixelAt(x0 + lx, y0 + ly)
+            }
+
+            // 分離ボックスブラー
+            System.arraycopy(blurSrc, 0, blurDst, 0, size)
+            repeat(passes) {
+                separableBoxBlurPass(blurDst, blurTmp, w, h, kr)
+                System.arraycopy(blurTmp, 0, blurDst, 0, size)
+            }
+
+            // 円形フォールオフ付きで content に書き戻し
+            val r2 = safeRadius * safeRadius
+            val fadeStart2 = (safeRadius * 0.7f).let { it * it }
+            val fadeRange = r2 - fadeStart2
+            for (ly in 0 until h) for (lx in 0 until w) {
+                val gdx = (x0 + lx) - cx; val gdy = (y0 + ly) - cy
+                val dist2 = gdx * gdx + gdy * gdy
+                if (dist2 >= r2) continue
+
+                val idx = ly * w + lx
+                val original = blurSrc[idx]
+                val blurred = blurDst[idx]
+
+                // フォールオフ: 中心=ぼかし結果、縁=元のピクセル
+                val pixel = if (dist2 <= fadeStart2) {
+                    blurred
+                } else {
+                    val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
+                    PixelOps.lerpColor(blurred, original, t * t)
+                }
+
+                val gpx = x0 + lx; val gpy = y0 + ly
+                val tx = drawTarget.pixelToTile(gpx)
+                val ty = drawTarget.pixelToTile(gpy)
+                if (tx < 0 || tx >= drawTarget.tilesX || ty < 0 || ty >= drawTarget.tilesY) continue
+                val tile = drawTarget.getOrCreateMutable(tx, ty)
+                tile.pixels[(gpy - ty * Tile.SIZE) * Tile.SIZE + (gpx - tx * Tile.SIZE)] = pixel
+                dirtyTracker.markDirty(tx, ty)
+            }
+            return
+        }
+
+        // ── Indirect モード: sublayer + content 合成ぼかし ───────────
+        // (Airbrush 等 indirect=true のブラシ用。筆/水彩は上の Direct パスを使用)
+        if (blurSubSrc.size < size) {
+            blurSubSrc = IntArray(size); blurSubDst = IntArray(size); blurSubTmp = IntArray(size)
+        }
+
+        for (ly in 0 until h) for (lx in 0 until w) {
+            val px = x0 + lx; val py = y0 + ly
+            val subPx = drawTarget.getPixelAt(px, py)
+            val contPx = sampleSource.getPixelAt(px, py)
+            val idx = ly * w + lx
+            blurSrc[idx] = PixelOps.blendSrcOver(contPx, subPx)
+            blurSubSrc[idx] = if (PixelOps.alpha(subPx) >= PixelOps.alpha(contPx)) subPx else contPx
+        }
+
+        // 分離ボックスブラー: 合成版 (RGB 混色用)
         System.arraycopy(blurSrc, 0, blurDst, 0, size)
         repeat(passes) {
             separableBoxBlurPass(blurDst, blurTmp, w, h, kr)
             System.arraycopy(blurTmp, 0, blurDst, 0, size)
         }
 
+        // 分離ボックスブラー: マスク用
+        System.arraycopy(blurSubSrc, 0, blurSubDst, 0, size)
+        repeat(passes) {
+            separableBoxBlurPass(blurSubDst, blurSubTmp, w, h, kr)
+            System.arraycopy(blurSubTmp, 0, blurSubDst, 0, size)
+        }
+
         // 円形フォールオフ付きでサブレイヤーに書き戻し
-        // ※ 逆合成: ぼかし結果 (合成値) からコンテンツ寄与分を差し引き、
-        //   endStroke の SrcOver で二重適用にならないようにする
         val r2 = safeRadius * safeRadius
         val fadeStart2 = (safeRadius * 0.7f).let { it * it }
         val fadeRange = r2 - fadeStart2
@@ -428,9 +443,22 @@ class BrushEngine(
             val idx = ly * w + lx
             val compositeOrig = blurSrc[idx]
             val compositeBlur = blurDst[idx]
+            val subOrig = blurSubSrc[idx]
+            val subBlur = blurSubDst[idx]
 
-            // フォールオフ: 中心=ぼかし結果、縁=合成元
-            val blended = if (dist2 <= fadeStart2) {
+            val bsa: Int
+            if (dist2 <= fadeStart2) {
+                bsa = PixelOps.alpha(subBlur)
+            } else {
+                val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
+                val tSq = t * t
+                val aBlur = PixelOps.alpha(subBlur)
+                val aOrig = PixelOps.alpha(subOrig)
+                bsa = (aBlur + ((aOrig - aBlur) * tSq).toInt()).coerceIn(0, 255)
+            }
+            if (bsa == 0) continue
+
+            val blendedComposite = if (dist2 <= fadeStart2) {
                 compositeBlur
             } else {
                 val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
@@ -438,15 +466,13 @@ class BrushEngine(
             }
 
             val gpx = x0 + lx; val gpy = y0 + ly
+            val contPx = sampleSource.getPixelAt(gpx, gpy)
+            val subPx = PixelOps.unComposite(blendedComposite, contPx)
 
-            // 逆合成: (subPx SrcOver contPx) = blended となる subPx を求める
-            val contPx = content.getPixelAt(gpx, gpy)
-            val subPx = PixelOps.unComposite(blended, contPx)
-
-            val tx = sublayer.pixelToTile(gpx)
-            val ty = sublayer.pixelToTile(gpy)
-            if (tx < 0 || tx >= sublayer.tilesX || ty < 0 || ty >= sublayer.tilesY) continue
-            val tile = sublayer.getOrCreateMutable(tx, ty)
+            val tx = drawTarget.pixelToTile(gpx)
+            val ty = drawTarget.pixelToTile(gpy)
+            if (tx < 0 || tx >= drawTarget.tilesX || ty < 0 || ty >= drawTarget.tilesY) continue
+            val tile = drawTarget.getOrCreateMutable(tx, ty)
             tile.pixels[(gpy - ty * Tile.SIZE) * Tile.SIZE + (gpx - tx * Tile.SIZE)] = subPx
             dirtyTracker.markDirty(tx, ty)
         }
@@ -561,10 +587,6 @@ data class BrushConfig(
     val isEraser: Boolean = false,
     val isMarker: Boolean = false,
     val isBlur: Boolean = false,
-    /** Smudge 量 (0=描画色のみ, 1=キャンバス色のみ)。Drawpile cb->smudge.max */
-    val smudge: Float = 0f,
-    /** 何ダブごとに再サンプリングするか。Drawpile cb->resmudge。0=毎ダブ */
-    val resmudge: Int = 0,
     /** ぼかし強度 (blur 用: サンプリング半径の倍率) */
     val blurStrength: Float = 1f,
     /** Drawpile paint_mode: true=Indirect(Wash), false=Direct */

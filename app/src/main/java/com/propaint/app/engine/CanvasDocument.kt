@@ -303,16 +303,42 @@ class CanvasDocument(val width: Int, val height: Int) {
 
         // クリッピング用ベースタイル追跡
         var clipBaseTile: IntArray? = null
+        var isBaseVisible = false
 
         for (layer in _layers) {
+            // --- クリッピングベース状態の更新 ---
+            // 非クリッピングレイヤー = 新しいベース候補
+            if (!layer.isClipToBelow) {
+                val layerVisible = layer.isVisible && (layer.opacity * 255f).toInt() > 0
+                val mainTile = layer.content.getTile(tx, ty)
+                val subTile = layer.sublayer?.getTile(tx, ty)
+                val hasTile = mainTile != null || subTile != null
+
+                if (layerVisible && hasTile) {
+                    isBaseVisible = true
+                    // clipBaseTile は下で合成後に設定される
+                } else {
+                    // ベースが非表示 / 透明 / タイルなし → クリッピング子も非表示
+                    isBaseVisible = layerVisible && !hasTile
+                    // タイルがないベースでも visible なら clipBaseTile は null
+                    // (子レイヤーはクリップ対象がないので描画されない)
+                    clipBaseTile = null
+                }
+            }
+
             if (!layer.isVisible) continue
             val op255 = (layer.opacity * 255f).toInt(); if (op255 <= 0) continue
 
             val mainTile = layer.content.getTile(tx, ty)
             val subTile = layer.sublayer?.getTile(tx, ty)
+
+            // クリッピングレイヤーの場合: ベースが非表示 or ベースタイルなし → スキップ
+            if (layer.isClipToBelow) {
+                if (!isBaseVisible || clipBaseTile == null) continue
+            }
+
             if (mainTile == null && subTile == null) {
-                // 非クリッピングレイヤーでタイルがない場合も clipBaseTile を維持
-                // (null にリセットするとクリッピングチェーンが途切れる)
+                // タイルがないレイヤーは描画するものがない
                 continue
             }
 
