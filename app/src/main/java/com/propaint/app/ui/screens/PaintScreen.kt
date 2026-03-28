@@ -3,6 +3,7 @@ package com.propaint.app.ui.screens
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,7 +15,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -166,8 +169,22 @@ fun PaintScreen(viewModel: PaintViewModel, onBack: () -> Unit) {
         GlCanvasView(
             renderer = viewModel.renderer,
             onTouch = { viewModel.onTouchEvent(it) },
+            onHover = { viewModel.onHoverEvent(it) },
             modifier = Modifier.fillMaxSize(),
         )
+
+        // ブラシサイズカーソル
+        val cursor by viewModel.cursorState.collectAsState()
+        if (cursor.visible && cursor.radius > 0.5f) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val center = Offset(cursor.x, cursor.y)
+                val r = cursor.radius
+                drawCircle(Color.Black, radius = r, center = center,
+                    style = Stroke(width = 2.5f))
+                drawCircle(Color.White, radius = r, center = center,
+                    style = Stroke(width = 1.2f))
+            }
+        }
 
         // スポイトモード表示
         if (toolMode == ToolMode.Eyedropper) {

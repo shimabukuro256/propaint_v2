@@ -88,11 +88,19 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _currentColor = MutableStateFlow(Color.Black)
     val currentColor: StateFlow<Color> = _currentColor.asStateFlow()
-    val colorHistory = MutableStateFlow(listOf(
-        Color.Black, Color.White, Color.Red, Color.Blue,
-        Color.Green, Color.Yellow, Color(0xFFFF6600), Color(0xFF9900FF),
-        Color(0xFF00CCCC), Color(0xFFFF69B4), Color(0xFF8B4513), Color(0xFF808080),
-    ))
+
+    companion object {
+        private const val MAX_COLOR_HISTORY = 32
+        private const val PREF_KEY_COLOR_HISTORY = "color_history"
+        private const val PREF_KEY_LAST_COLOR = "last_color"
+        private val DEFAULT_PALETTE = listOf(
+            Color.Black, Color.White, Color.Red, Color.Blue,
+            Color.Green, Color.Yellow, Color(0xFFFF6600), Color(0xFF9900FF),
+            Color(0xFF00CCCC), Color(0xFFFF69B4), Color(0xFF8B4513), Color(0xFF808080),
+        )
+    }
+
+    val colorHistory = MutableStateFlow(loadColorHistory())
 
     private val _canUndo = MutableStateFlow(false)
     val canUndo: StateFlow<Boolean> = _canUndo.asStateFlow()
@@ -100,6 +108,26 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     val canRedo: StateFlow<Boolean> = _canRedo.asStateFlow()
     private val _isDrawing = MutableStateFlow(false)
     val isDrawing: StateFlow<Boolean> = _isDrawing.asStateFlow()
+
+    // ── ブラシカーソル ────────────────────────────────────────────────
+    data class CursorState(val x: Float, val y: Float, val radius: Float, val visible: Boolean)
+    private val _cursorState = MutableStateFlow(CursorState(0f, 0f, 0f, false))
+    val cursorState: StateFlow<CursorState> = _cursorState.asStateFlow()
+
+    private fun updateCursor(screenX: Float, screenY: Float, pressure: Float) {
+        val doc = _document ?: return
+        val sw = renderer.surfaceWidth.toFloat(); val sh = renderer.surfaceHeight.toFloat()
+        if (sw <= 0 || sh <= 0) return
+        val bs = min(sw / doc.width, sh / doc.height); val fs = bs * _zoom
+        val nomRad = _brushSize.value / 2f
+        val rad = if (_pressureSizeEnabled.value) {
+            val minRad = 0.5f
+            minRad + (nomRad - minRad) * pressure.coerceIn(0f, 1f)
+        } else nomRad
+        _cursorState.value = CursorState(screenX, screenY, rad * fs, true)
+    }
+
+    private fun hideCursor() { _cursorState.value = _cursorState.value.copy(visible = false) }
 
     // View transform
     private var _zoom = 1f; private var _panX = 0f; private var _panY = 0f; private var _rotation = 0f
@@ -337,12 +365,58 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun togglePressureSize() { _pressureSizeEnabled.value = !_pressureSizeEnabled.value; persistCurrentBrush() }
     fun togglePressureOpacity() { _pressureOpacityEnabled.value = !_pressureOpacityEnabled.value; persistCurrentBrush() }
     fun togglePressureDensity() { _pressureDensityEnabled.value = !_pressureDensityEnabled.value; persistCurrentBrush() }
+    /** 現在の描画色を変更する (履歴には追加しない。ドラッグ中等のリアルタイム更新用) */
     fun setColor(color: Color) {
+        _currentColor.value = color
+    }
+
+    /**
+     * 現在色を履歴に確定登録する。
+     * カラーピッカーの指離し・スポイト確定・履歴クリック等、
+     * ユーザーの意図的な色選択が完了した時点で呼ぶ。
+     */
+    fun commitColorToHistory(color: Color = _currentColor.value) {
         _currentColor.value = color
         val hist = colorHistory.value.toMutableList()
         hist.remove(color); hist.add(0, color)
-        if (hist.size > 20) hist.removeLast()
+        while (hist.size > MAX_COLOR_HISTORY) hist.removeLast()
         colorHistory.value = hist
+        persistColorHistory()
+    }
+
+    private fun colorToArgbInt(c: Color): Int =
+        (0xFF shl 24) or
+        ((c.red * 255f + 0.5f).toInt().coerceIn(0, 255) shl 16) or
+        ((c.green * 255f + 0.5f).toInt().coerceIn(0, 255) shl 8) or
+        (c.blue * 255f + 0.5f).toInt().coerceIn(0, 255)
+
+    private fun argbIntToColor(argb: Int): Color = Color(
+        ((argb shr 16) and 0xFF) / 255f,
+        ((argb shr 8) and 0xFF) / 255f,
+        (argb and 0xFF) / 255f,
+    )
+
+    private fun loadColorHistory(): List<Color> {
+        val saved = prefs.getString(PREF_KEY_COLOR_HISTORY, null) ?: return DEFAULT_PALETTE
+        val colors = saved.split(",").mapNotNull { s ->
+            s.trim().toLongOrNull()?.let { argbIntToColor(it.toInt()) }
+        }
+        if (colors.isEmpty()) return DEFAULT_PALETTE
+
+        // 最終選択色を復元
+        prefs.getLong(PREF_KEY_LAST_COLOR, -1L).let {
+            if (it >= 0) _currentColor.value = argbIntToColor(it.toInt())
+        }
+        return colors.take(MAX_COLOR_HISTORY)
+    }
+
+    private fun persistColorHistory() {
+        val hist = colorHistory.value
+        val csv = hist.joinToString(",") { colorToArgbInt(it).toLong().and(0xFFFFFFFFL).toString() }
+        prefs.edit()
+            .putString(PREF_KEY_COLOR_HISTORY, csv)
+            .putLong(PREF_KEY_LAST_COLOR, colorToArgbInt(_currentColor.value).toLong().and(0xFFFFFFFFL))
+            .apply()
     }
 
     fun activateEyedropper() { _toolMode.value = ToolMode.Eyedropper }
@@ -367,15 +441,18 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val colStretch: Float
         var subFilter = BrushConfig.SUBLAYER_FILTER_NONE
         var blurPressThreshold = 0f
+        var filterScale = 1f
 
         when (type) {
             BrushType.Fude -> {
                 // 筆: content に直接描画+ぼかし (AVERAGING フィルタ)。
                 // indirect=false: sublayer→merge の二重適用を防ぎ安定した混色を実現。
+                // filterRadiusScale=1.5: 水彩より強い混色効果。ブラシサイズと連動しなくなるので1に設定。
                 isBlur = false; blurStr = 0f
                 indirect = false; waterCont = 0f; colStretch = _colorStretch.value
                 subFilter = BrushConfig.SUBLAYER_FILTER_AVERAGING
                 blurPressThreshold = _blurPressureThreshold.value
+                filterScale = 1.0f
             }
             BrushType.Watercolor -> {
                 // 水彩: content に直接描画+ぼかし (BOX_BLUR フィルタ)。
@@ -427,8 +504,21 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             colorStretch = colStretch,
             stabilizer = _brushStabilizer.value,
             sublayerFilter = subFilter,
+            filterRadiusScale = filterScale,
             blurPressureThreshold = blurPressThreshold,
         )
+    }
+
+    // ── ホバー入力 (スタイラス) ────────────────────────────────────────
+
+    fun onHoverEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                updateCursor(event.x, event.y, 1f)
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> hideCursor()
+        }
+        return true
     }
 
     // ── タッチ入力 ──────────────────────────────────────────────────
@@ -436,7 +526,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun onTouchEvent(event: MotionEvent): Boolean {
         val doc = _document ?: return false
 
-        if (event.pointerCount >= 2) { handleMultiTouch(event); return true }
+        if (event.pointerCount >= 2) { hideCursor(); handleMultiTouch(event); return true }
 
         if (isMultiTouch && event.actionMasked == MotionEvent.ACTION_MOVE) return true
         if (isMultiTouch && event.actionMasked == MotionEvent.ACTION_UP) { isMultiTouch = false; return true }
@@ -447,12 +537,14 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 isMultiTouch = false
+                updateCursor(event.x, event.y, event.pressure)
                 if (_toolMode.value == ToolMode.Eyedropper) {
                     val (dx, dy) = screenToDoc(event.x, event.y)
                     val sampled = doc.eyedropperAt(dx.toInt(), dy.toInt())
                     val up = PixelOps.unpremultiply(sampled)
-                    setColor(Color(PixelOps.red(up) / 255f, PixelOps.green(up) / 255f, PixelOps.blue(up) / 255f))
+                    commitColorToHistory(Color(PixelOps.red(up) / 255f, PixelOps.green(up) / 255f, PixelOps.blue(up) / 255f))
                     _toolMode.value = ToolMode.Draw
+                    hideCursor()
                     return true
                 }
                 var brush = buildBrushConfig()
@@ -462,6 +554,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 processDrawPoints(event, doc, brush)
             }
             MotionEvent.ACTION_MOVE -> {
+                updateCursor(event.x, event.y, event.pressure)
                 if (_isDrawing.value) {
                     var brush = buildBrushConfig()
                     if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
@@ -469,6 +562,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                hideCursor()
                 if (_isDrawing.value) {
                     var brush = buildBrushConfig()
                     if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)

@@ -42,12 +42,16 @@ fun ColorPickerPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier:
         hue = hsv[0]; sat = hsv[1]; value = hsv[2]
     }
 
+    /** ドラッグ中のリアルタイム更新 (履歴には追加しない) */
     fun update(h: Float, s: Float, v: Float) {
         hue = h; sat = s; value = v
         val rgb = android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))
         viewModel.setColor(Color(((rgb shr 16) and 0xFF) / 255f,
             ((rgb shr 8) and 0xFF) / 255f, (rgb and 0xFF) / 255f))
     }
+
+    /** 色選択を確定 (指離し・タップ完了時) */
+    fun commit() { viewModel.commitColorToHistory() }
 
     Card(modifier = modifier.width(300.dp), shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xEE222222)),
@@ -61,11 +65,15 @@ fun ColorPickerPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier:
                 Canvas(Modifier.fillMaxSize()
                     .pointerInput(hue) { detectTapGestures { o ->
                         update(hue, (o.x / size.width).coerceIn(0f, 1f), 1f - (o.y / size.height).coerceIn(0f, 1f))
+                        commit()
                     }}
-                    .pointerInput(hue) { detectDragGestures { c, _ -> c.consume()
-                        update(hue, (c.position.x / size.width).coerceIn(0f, 1f),
-                            1f - (c.position.y / size.height).coerceIn(0f, 1f))
-                    }}
+                    .pointerInput(hue) { detectDragGestures(
+                        onDragEnd = { commit() },
+                        onDrag = { c, _ -> c.consume()
+                            update(hue, (c.position.x / size.width).coerceIn(0f, 1f),
+                                1f - (c.position.y / size.height).coerceIn(0f, 1f))
+                        }
+                    )}
                 ) {
                     val w = size.width; val h = size.height; val step = 4f
                     var x = 0f
@@ -89,10 +97,15 @@ fun ColorPickerPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier:
                 Spacer(Modifier.width(8.dp))
                 Box(Modifier.weight(1f).height(22.dp)) {
                     Canvas(Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp))
-                        .pointerInput(Unit) { detectTapGestures { o -> update(o.x / size.width * 360f, sat, value) }}
-                        .pointerInput(Unit) { detectDragGestures { c, _ -> c.consume()
-                            update((c.position.x / size.width * 360f).coerceIn(0f, 360f), sat, value)
+                        .pointerInput(Unit) { detectTapGestures { o ->
+                            update(o.x / size.width * 360f, sat, value); commit()
                         }}
+                        .pointerInput(Unit) { detectDragGestures(
+                            onDragEnd = { commit() },
+                            onDrag = { c, _ -> c.consume()
+                                update((c.position.x / size.width * 360f).coerceIn(0f, 360f), sat, value)
+                            }
+                        )}
                     ) {
                         val w = size.width; val h = size.height; val step = 2f; var x = 0f
                         while (x < w) {
@@ -117,7 +130,7 @@ fun ColorPickerPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier:
                         .border(if (c == currentColor) 2.dp else 1.dp,
                             if (c == currentColor) Color.White else Color(0xFF444444),
                             RoundedCornerShape(3.dp))
-                        .clickable { viewModel.setColor(c) })
+                        .clickable { viewModel.commitColorToHistory(c) })
                 }
             }
 

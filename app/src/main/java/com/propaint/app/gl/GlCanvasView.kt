@@ -17,6 +17,7 @@ class PaintGlSurfaceView(
 ) : GLSurfaceView(context) {
 
     var onTouchCallback: ((MotionEvent) -> Boolean)? = null
+    var onHoverCallback: ((MotionEvent) -> Boolean)? = null
 
     init {
         setEGLContextClientVersion(3)
@@ -28,18 +29,24 @@ class PaintGlSurfaceView(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         return onTouchCallback?.invoke(event) ?: super.onTouchEvent(event)
     }
+
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        return onHoverCallback?.invoke(event) ?: super.onHoverEvent(event)
+    }
 }
 
 @Composable
 fun GlCanvasView(
     renderer: CanvasRenderer,
     onTouch: (MotionEvent) -> Boolean,
+    onHover: ((MotionEvent) -> Boolean)? = null,
     modifier: Modifier = Modifier,
 ) {
     AndroidView(
         factory = { context ->
             PaintGlSurfaceView(context, renderer).apply {
                 onTouchCallback = onTouch
+                onHoverCallback = onHover
             }
         },
         modifier = modifier,

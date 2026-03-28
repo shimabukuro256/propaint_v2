@@ -29,6 +29,18 @@ class BrushEngine(
     private var blurSubDst = IntArray(0)
     private var blurSubTmp = IntArray(0)
 
+    // リニアライト空間ブラー用バッファ (sRGB 空間で平均化すると色が濁るため)
+    private var blurLinSrc = LongArray(0)
+    private var blurLinTmp = LongArray(0)
+    private var blurLinDst = LongArray(0)
+    private var blurLinSubSrc = LongArray(0)
+    private var blurLinSubDst = LongArray(0)
+    private var blurLinSubTmp = LongArray(0)
+
+    // ── 進行方向追従: 前回ダブ位置 ────────────────────────────────
+    private var prevDabX = Float.NaN
+    private var prevDabY = Float.NaN
+
     // ── 手振れ補正 (リアルタイム EMA フィルタ) ─────────────────────
     // 指数移動平均: 入力座標と筆圧をリアルタイムに平滑化。
     // stabilizer=0 でバイパス、stabilizer=1 で最大平滑化。
@@ -51,6 +63,7 @@ class BrushEngine(
         pointBuffer.clear()
         strokeLayerId = layerId
         stabInitialized = false
+        prevDabX = Float.NaN; prevDabY = Float.NaN
         PaintDebug.d(PaintDebug.Brush) { "[beginStroke] layerId=$layerId" }
     }
 
@@ -135,6 +148,7 @@ class BrushEngine(
         brush: BrushConfig,
     ) {
         if (points.size < 2) return
+        prevDabX = Float.NaN; prevDabY = Float.NaN
         renderSegments(points, 0, 0f, drawTarget, sampleSource, brush, applyExitTaper = true)
     }
 
@@ -200,9 +214,17 @@ class BrushEngine(
                 val pressure = p0.pressure + (p1.pressure - p0.pressure) * t
 
                 // 筆圧→サイズ (最小 0.5 = 直径1px)
+                // ぼかし筆圧閾値が設定されている場合、閾値時点のサイズを下限とする
+                // (閾値以下でもブラシサイズが極端に縮小しない)
                 val pRad = if (brush.pressureSizeEnabled) {
                     val minRad = 0.5f
-                    minRad + (nomRad - minRad) * pressureCurve(pressure, brush.pressureSizeIntensity)
+                    val curve = pressureCurve(pressure, brush.pressureSizeIntensity)
+                    val rad = minRad + (nomRad - minRad) * curve
+                    if (brush.blurPressureThreshold > 0f && pressure < brush.blurPressureThreshold) {
+                        val threshCurve = pressureCurve(brush.blurPressureThreshold, brush.pressureSizeIntensity)
+                        val threshRad = minRad + (nomRad - minRad) * threshCurve
+                        maxOf(rad, threshRad)
+                    } else rad
                 } else nomRad
 
                 // 筆圧→不透明度
@@ -225,8 +247,13 @@ class BrushEngine(
                 if (finalRad < 0.25f) { dist += stepDist; continue }
 
                 // ── ぼかし筆圧判定 ──────────────────────────────────────────
-                val belowBlurThreshold = brush.blurPressureThreshold > 0f &&
-                    pressure < brush.blurPressureThreshold
+                val blurThresh = brush.blurPressureThreshold
+                val belowBlurThreshold = blurThresh > 0f && pressure < blurThresh
+                // 閾値超過時のフェードイン: 閾値〜閾値+遷移幅の間で描画色を緩やかに導入
+                val blurFadeRange = maxOf(0.05f, blurThresh * 0.5f)
+                val colorFade = if (blurThresh <= 0f || pressure >= blurThresh + blurFadeRange) 1f
+                    else if (pressure <= blurThresh) 0f
+                    else smoothStep((pressure - blurThresh) / blurFadeRange)
 
                 // ── ダブ色決定 ────────────────────────────────────────────
                 val dabColor: Int = when {
@@ -239,6 +266,16 @@ class BrushEngine(
                     }
                     // ぼかし筆圧閾値以下: ダブ無し (フィルタのみ適用)
                     belowBlurThreshold -> 0
+                    // フェードイン区間: premultiplied 色を均一にスケール
+                    colorFade < 1f -> {
+                        val f = (colorFade * 255f).toInt().coerceIn(0, 255)
+                        val c = brush.colorPremul
+                        PixelOps.pack(
+                            PixelOps.div255(PixelOps.alpha(c) * f),
+                            PixelOps.div255(PixelOps.red(c) * f),
+                            PixelOps.div255(PixelOps.green(c) * f),
+                            PixelOps.div255(PixelOps.blue(c) * f))
+                    }
                     // 通常: 描画色そのまま (混色は blurAreaOnSurface で行う)
                     else -> brush.colorPremul
                 }
@@ -260,24 +297,22 @@ class BrushEngine(
 
                 // ── サブレイヤーフィルタ付きダブ配置 ──────────────────────
                 val hasFilter = brush.sublayerFilter != BrushConfig.SUBLAYER_FILTER_NONE
-                val filterRadius = maxOf(1, nomRad.toInt())
+                val filterRadius = maxOf(1, (nomRad * brush.filterRadiusScale).toInt())
 
-                if (belowBlurThreshold && hasFilter) {
-                    // 閾値以下: ダブを描画せず、既存サブレイヤーをぼかすのみ
+                // ダブマスク生成 & 進行方向に垂直な縁の濃度低減
+                val dab = DabMaskGenerator.createDab(px, py, finalRad * 2f, brush.hardness)
+                if (dab != null && hasFilter) {
+                    applyDirectionalEdgeFade(dab, px, py, finalRad)
+                }
+                if (dab != null && dabColor != 0) {
+                    applyDabToSurface(drawTarget, dab, dabColor, finalOpacity, blendId)
+                }
+                // ダブ配置後にフィルタ適用 (筆/水彩の混色効果)
+                if (hasFilter) {
                     blurAreaOnSurface(drawTarget, sampleSource, px.toInt(), py.toInt(),
                         filterRadius, brush.sublayerFilter)
-                } else {
-                    // ダブマスク生成 & タイルに合成
-                    val dab = DabMaskGenerator.createDab(px, py, finalRad * 2f, brush.hardness)
-                    if (dab != null) {
-                        applyDabToSurface(drawTarget, dab, dabColor, finalOpacity, blendId)
-                    }
-                    // ダブ配置後にフィルタ適用 (筆/水彩の混色効果)
-                    if (hasFilter) {
-                        blurAreaOnSurface(drawTarget, sampleSource, px.toInt(), py.toInt(),
-                            filterRadius, brush.sublayerFilter)
-                    }
                 }
+                prevDabX = px; prevDabY = py
 
                 dist += stepDist
             }
@@ -337,7 +372,7 @@ class BrushEngine(
         drawTarget: TiledSurface, sampleSource: TiledSurface,
         cx: Int, cy: Int, radius: Int, filterType: Int,
     ) {
-        val safeRadius = radius.coerceIn(1, 60)
+        val safeRadius = radius.coerceIn(1, 2000)
         val x0 = maxOf(0, cx - safeRadius)
         val y0 = maxOf(0, cy - safeRadius)
         val x1 = minOf(drawTarget.width - 1, cx + safeRadius)
@@ -352,22 +387,32 @@ class BrushEngine(
         if (blurSrc.size < size) {
             blurSrc = IntArray(size); blurTmp = IntArray(size); blurDst = IntArray(size)
         }
+        if (blurLinSrc.size < size) {
+            blurLinSrc = LongArray(size); blurLinTmp = LongArray(size); blurLinDst = LongArray(size)
+        }
 
         val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
         val kr = maxOf(1, safeRadius / 3)
 
-        // ── Direct モード: content を直接ぼかし ──────────────────────
+        // ── Direct モード: content を直接ぼかし (リニアライト空間) ────
         if (drawTarget === sampleSource) {
-            // 入力: content ピクセルをそのまま読み取り
+            // 入力: sRGB → リニア変換
             for (ly in 0 until h) for (lx in 0 until w) {
-                blurSrc[ly * w + lx] = drawTarget.getPixelAt(x0 + lx, y0 + ly)
+                val px = drawTarget.getPixelAt(x0 + lx, y0 + ly)
+                blurSrc[ly * w + lx] = px
+                blurLinSrc[ly * w + lx] = PixelOps.pixelToLinear64(px)
             }
 
-            // 分離ボックスブラー
-            System.arraycopy(blurSrc, 0, blurDst, 0, size)
+            // 分離ボックスブラー (リニア空間)
+            System.arraycopy(blurLinSrc, 0, blurLinDst, 0, size)
             repeat(passes) {
-                separableBoxBlurPass(blurDst, blurTmp, w, h, kr)
-                System.arraycopy(blurTmp, 0, blurDst, 0, size)
+                separableBoxBlurPassLinear(blurLinDst, blurLinTmp, w, h, kr)
+                System.arraycopy(blurLinTmp, 0, blurLinDst, 0, size)
+            }
+
+            // リニア → sRGB 変換
+            for (i in 0 until size) {
+                blurDst[i] = PixelOps.linear64ToPixel(blurLinDst[i])
             }
 
             // 円形フォールオフ付きで content に書き戻し
@@ -402,10 +447,13 @@ class BrushEngine(
             return
         }
 
-        // ── Indirect モード: sublayer + content 合成ぼかし ───────────
+        // ── Indirect モード: sublayer + content 合成ぼかし (リニアライト空間) ──
         // (Airbrush 等 indirect=true のブラシ用。筆/水彩は上の Direct パスを使用)
         if (blurSubSrc.size < size) {
             blurSubSrc = IntArray(size); blurSubDst = IntArray(size); blurSubTmp = IntArray(size)
+        }
+        if (blurLinSubSrc.size < size) {
+            blurLinSubSrc = LongArray(size); blurLinSubDst = LongArray(size); blurLinSubTmp = LongArray(size)
         }
 
         for (ly in 0 until h) for (lx in 0 until w) {
@@ -413,23 +461,29 @@ class BrushEngine(
             val subPx = drawTarget.getPixelAt(px, py)
             val contPx = sampleSource.getPixelAt(px, py)
             val idx = ly * w + lx
-            blurSrc[idx] = PixelOps.blendSrcOver(contPx, subPx)
-            blurSubSrc[idx] = if (PixelOps.alpha(subPx) >= PixelOps.alpha(contPx)) subPx else contPx
+            val comp = PixelOps.blendSrcOver(contPx, subPx)
+            blurSrc[idx] = comp
+            blurLinSrc[idx] = PixelOps.pixelToLinear64(comp)
+            val mask = if (PixelOps.alpha(subPx) >= PixelOps.alpha(contPx)) subPx else contPx
+            blurSubSrc[idx] = mask
+            blurLinSubSrc[idx] = PixelOps.pixelToLinear64(mask)
         }
 
-        // 分離ボックスブラー: 合成版 (RGB 混色用)
-        System.arraycopy(blurSrc, 0, blurDst, 0, size)
+        // 分離ボックスブラー (リニア空間): 合成版 (RGB 混色用)
+        System.arraycopy(blurLinSrc, 0, blurLinDst, 0, size)
         repeat(passes) {
-            separableBoxBlurPass(blurDst, blurTmp, w, h, kr)
-            System.arraycopy(blurTmp, 0, blurDst, 0, size)
+            separableBoxBlurPassLinear(blurLinDst, blurLinTmp, w, h, kr)
+            System.arraycopy(blurLinTmp, 0, blurLinDst, 0, size)
         }
+        for (i in 0 until size) blurDst[i] = PixelOps.linear64ToPixel(blurLinDst[i])
 
-        // 分離ボックスブラー: マスク用
-        System.arraycopy(blurSubSrc, 0, blurSubDst, 0, size)
+        // 分離ボックスブラー (リニア空間): マスク用
+        System.arraycopy(blurLinSubSrc, 0, blurLinSubDst, 0, size)
         repeat(passes) {
-            separableBoxBlurPass(blurSubDst, blurSubTmp, w, h, kr)
-            System.arraycopy(blurSubTmp, 0, blurSubDst, 0, size)
+            separableBoxBlurPassLinear(blurLinSubDst, blurLinSubTmp, w, h, kr)
+            System.arraycopy(blurLinSubTmp, 0, blurLinSubDst, 0, size)
         }
+        for (i in 0 until size) blurSubDst[i] = PixelOps.linear64ToPixel(blurLinSubDst[i])
 
         // 円形フォールオフ付きでサブレイヤーに書き戻し
         val r2 = safeRadius * safeRadius
@@ -537,6 +591,65 @@ class BrushEngine(
         }
     }
 
+    /**
+     * 分離ボックスブラー 1パス (リニアライト空間版)。
+     * Long パックレイアウト: A(16) | R(16) | G(16) | B(16)。
+     * sRGB 空間での平均化による色の濁りを防止。
+     */
+    private fun separableBoxBlurPassLinear(
+        input: LongArray, output: LongArray, w: Int, h: Int, kr: Int,
+    ) {
+        val d = kr * 2 + 1
+
+        // ── 水平パス: input → output ──
+        for (y in 0 until h) {
+            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
+            val row = y * w
+            for (x in -kr..kr) {
+                val c = input[row + x.coerceIn(0, w - 1)]
+                aAcc += (c ushr 48) and 0xFFFF; rAcc += (c ushr 32) and 0xFFFF
+                gAcc += (c ushr 16) and 0xFFFF; bAcc += c and 0xFFFF
+            }
+            for (x in 0 until w) {
+                val oa = (aAcc / d); val or_ = (rAcc / d)
+                val og = (gAcc / d); val ob = (bAcc / d)
+                output[row + x] = (oa shl 48) or ((or_ and 0xFFFF) shl 32) or
+                    ((og and 0xFFFF) shl 16) or (ob and 0xFFFF)
+                val addX = (x + kr + 1).coerceAtMost(w - 1)
+                val remX = (x - kr).coerceAtLeast(0)
+                val ac = input[row + addX]; val rc = input[row + remX]
+                aAcc += ((ac ushr 48) and 0xFFFF) - ((rc ushr 48) and 0xFFFF)
+                rAcc += ((ac ushr 32) and 0xFFFF) - ((rc ushr 32) and 0xFFFF)
+                gAcc += ((ac ushr 16) and 0xFFFF) - ((rc ushr 16) and 0xFFFF)
+                bAcc += (ac and 0xFFFF) - (rc and 0xFFFF)
+            }
+        }
+
+        // ── 垂直パス: output を in-place で上書き (input を temp として再利用) ──
+        System.arraycopy(output, 0, input, 0, w * h)
+        for (x in 0 until w) {
+            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
+            for (y in -kr..kr) {
+                val c = input[y.coerceIn(0, h - 1) * w + x]
+                aAcc += (c ushr 48) and 0xFFFF; rAcc += (c ushr 32) and 0xFFFF
+                gAcc += (c ushr 16) and 0xFFFF; bAcc += c and 0xFFFF
+            }
+            for (y in 0 until h) {
+                val oa = (aAcc / d); val or_ = (rAcc / d)
+                val og = (gAcc / d); val ob = (bAcc / d)
+                output[y * w + x] = (oa shl 48) or ((or_ and 0xFFFF) shl 32) or
+                    ((og and 0xFFFF) shl 16) or (ob and 0xFFFF)
+                val addY = (y + kr + 1).coerceAtMost(h - 1)
+                val remY = (y - kr).coerceAtLeast(0)
+                val ac = input[addY * w + x]; val rc = input[remY * w + x]
+                aAcc += ((ac ushr 48) and 0xFFFF) - ((rc ushr 48) and 0xFFFF)
+                rAcc += ((ac ushr 32) and 0xFFFF) - ((rc ushr 32) and 0xFFFF)
+                gAcc += ((ac ushr 16) and 0xFFFF) - ((rc ushr 16) and 0xFFFF)
+                bAcc += (ac and 0xFFFF) - (rc and 0xFFFF)
+            }
+        }
+    }
+
     // ── ヘルパー ─────────────────────────────────────────────────────
 
     private fun catmullRom(p0: Float, p1: Float, p2: Float, p3: Float, t: Float): Float {
@@ -547,6 +660,38 @@ class BrushEngine(
 
     private fun smoothStep(t: Float): Float {
         val c = t.coerceIn(0f, 1f); return c * c * (3f - 2f * c)
+    }
+
+    /**
+     * 進行方向に対して垂直な縁の濃度を低減。
+     * ダブ間の重なりで生じるバンディングを軽減する。
+     * ストローク方向を (prevDabX,Y → dabX,Y) から求め、
+     * 各マスクピクセルの垂直距離に応じて濃度を減衰。
+     */
+    private fun applyDirectionalEdgeFade(dab: DabMask, dabX: Float, dabY: Float, radius: Float) {
+        if (prevDabX.isNaN() || radius < 1f) return
+        val ddx = dabX - prevDabX; val ddy = dabY - prevDabY
+        val dirLen = sqrt(ddx * ddx + ddy * ddy)
+        if (dirLen < 0.5f) return
+        // 垂直方向の単位ベクトル (-dy, dx) / len
+        val perpX = -ddy / dirLen; val perpY = ddx / dirLen
+        val d = dab.diameter
+        val r = radius
+        val fadeStart = 0.80f  // 半径の 80% から減衰開始
+        val fadeStrength = 0.05f // 最縁で最大 5% 減衰
+        for (y in 0 until d) {
+            val oy = y - d / 2f + 0.5f
+            val ro = y * d
+            for (x in 0 until d) {
+                val v = dab.data[ro + x]; if (v <= 0) continue
+                val ox = x - d / 2f + 0.5f
+                // 垂直方向への射影 (絶対値 = 進行方向と直交する距離)
+                val perpDist = kotlin.math.abs(perpX * ox + perpY * oy) / r
+                if (perpDist <= fadeStart) continue
+                val t = smoothStep((perpDist - fadeStart) / (1f - fadeStart))
+                dab.data[ro + x] = (v * (1f - fadeStrength * t)).toInt().coerceAtLeast(0)
+            }
+        }
     }
 
     /**
@@ -611,6 +756,8 @@ data class BrushConfig(
     // ── サブレイヤーフィルタ (筆/水彩の混色用) ──
     /** SUBLAYER_FILTER_NONE / SUBLAYER_FILTER_AVERAGING / SUBLAYER_FILTER_BOX_BLUR */
     val sublayerFilter: Int = SUBLAYER_FILTER_NONE,
+    /** フィルタ半径の倍率 (筆=1.5, 水彩=1.0) */
+    val filterRadiusScale: Float = 1f,
     // ── ぼかし筆圧 (Fude/Watercolor 用) ──
     /** 筆圧がこの閾値を下回ると描画色が 0 になりスマッジ専用になる */
     val blurPressureThreshold: Float = 0f,

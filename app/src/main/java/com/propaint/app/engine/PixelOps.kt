@@ -1,5 +1,7 @@
 package com.propaint.app.engine
 
+import kotlin.math.pow
+
 /**
  * CPU ピクセル演算。全て premultiplied ARGB_8888。
  * Drawpile pixels.c / blend_mode.c 準拠。
@@ -350,15 +352,98 @@ object PixelOps {
         return pack(sa, sr, sg, sb)
     }
 
-    /** premultiplied 色の線形補間 (smudge mix 用) */
+    // ── sRGB ↔ リニアライト変換 ─────────────────────────────────────
+    // ガンマ空間で色を平均化すると暗く濁るため、
+    // ブラー・lerpColor・サンプリングはリニア空間で行う。
+
+    /** sRGB 8-bit (0..255) → リニア 16-bit (0..65535) */
+    val SRGB_TO_LINEAR = IntArray(256) { i ->
+        val s = i / 255.0
+        val lin = if (s <= 0.04045) s / 12.92
+                  else ((s + 0.055) / 1.055).pow(2.4)
+        (lin * 65535.0 + 0.5).toInt().coerceIn(0, 65535)
+    }
+
+    /** リニア 12-bit (0..4095) → sRGB 8-bit (0..255) */
+    private val LINEAR_TO_SRGB = IntArray(4096) { i ->
+        val lin = i / 4095.0
+        val s = if (lin <= 0.0031308) lin * 12.92
+                else 1.055 * lin.pow(1.0 / 2.4) - 0.055
+        (s * 255.0 + 0.5).toInt().coerceIn(0, 255)
+    }
+
+    /** リニア 16-bit → sRGB 8-bit (12-bit LUT 参照) */
+    fun linearToSrgb(linear16: Int): Int =
+        LINEAR_TO_SRGB[(linear16 ushr 4).coerceIn(0, 4095)]
+
+    /**
+     * premultiplied sRGB pixel → premultiplied リニア 4×16-bit (Long にパック)。
+     * Long レイアウト: A(16) | R(16) | G(16) | B(16)。
+     * ブラー・平均化をリニア空間で行うために使用。
+     */
+    fun pixelToLinear64(pixel: Int): Long {
+        val a = alpha(pixel)
+        if (a == 0) return 0L
+        val a16 = a.toLong() * 257 // 0..255 → 0..65535 (α はリニア)
+        if (a == 255) {
+            // 高速パス: un-premultiply 不要
+            return (a16 shl 48) or
+                (SRGB_TO_LINEAR[red(pixel)].toLong() shl 32) or
+                (SRGB_TO_LINEAR[green(pixel)].toLong() shl 16) or
+                SRGB_TO_LINEAR[blue(pixel)].toLong()
+        }
+        // un-premultiply → linearize → re-premultiply (16-bit)
+        // 四捨五入除算で低アルファ時の色情報消失を防止
+        val r = minOf(255, (red(pixel) * 255 + a / 2) / a)
+        val g = minOf(255, (green(pixel) * 255 + a / 2) / a)
+        val b = minOf(255, (blue(pixel) * 255 + a / 2) / a)
+        return (a16 shl 48) or
+            (div255(SRGB_TO_LINEAR[r] * a).toLong() shl 32) or
+            (div255(SRGB_TO_LINEAR[g] * a).toLong() shl 16) or
+            div255(SRGB_TO_LINEAR[b] * a).toLong()
+    }
+
+    /**
+     * premultiplied リニア 4×16-bit (Long) → premultiplied sRGB pixel。
+     */
+    fun linear64ToPixel(linear: Long): Int {
+        val a16 = ((linear ushr 48) and 0xFFFF).toInt()
+        if (a16 == 0) return 0
+        val a = (a16 + 128) / 257 // 0..65535 → 0..255
+        if (a <= 0) return 0
+        val r16 = ((linear ushr 32) and 0xFFFF).toInt()
+        val g16 = ((linear ushr 16) and 0xFFFF).toInt()
+        val b16 = (linear and 0xFFFF).toInt()
+        if (a >= 255) {
+            return pack(255,
+                linearToSrgb(r16), linearToSrgb(g16), linearToSrgb(b16))
+        }
+        // un-premultiply (リニア) → sRGB → re-premultiply (sRGB)
+        // 四捨五入除算で低アルファ時の色情報消失を防止
+        val rStr = ((r16 * 255L + a / 2) / a).toInt().coerceIn(0, 65535)
+        val gStr = ((g16 * 255L + a / 2) / a).toInt().coerceIn(0, 65535)
+        val bStr = ((b16 * 255L + a / 2) / a).toInt().coerceIn(0, 65535)
+        val r8 = linearToSrgb(rStr)
+        val g8 = linearToSrgb(gStr)
+        val b8 = linearToSrgb(bStr)
+        return pack(a, div255(r8 * a), div255(g8 * a), div255(b8 * a))
+    }
+
+    // ── 色補間 ────────────────────────────────────────────────────────
+
+    /** premultiplied 色のリニア空間補間 (smudge mix 用) */
     fun lerpColor(a: Int, b: Int, t: Float): Int {
         if (t <= 0f) return a; if (t >= 1f) return b
         val t1 = 1f - t
-        return pack(
-            (alpha(a) * t1 + alpha(b) * t).toInt(),
-            (red(a) * t1 + red(b) * t).toInt(),
-            (green(a) * t1 + green(b) * t).toInt(),
-            (blue(a) * t1 + blue(b) * t).toInt(),
+        // リニア空間で補間して sRGB に戻す (濁り防止)
+        val la = pixelToLinear64(a); val lb = pixelToLinear64(b)
+        val ma = ((((la ushr 48) and 0xFFFF) * t1 + ((lb ushr 48) and 0xFFFF) * t).toLong())
+        val mr = ((((la ushr 32) and 0xFFFF) * t1 + ((lb ushr 32) and 0xFFFF) * t).toLong())
+        val mg = ((((la ushr 16) and 0xFFFF) * t1 + ((lb ushr 16) and 0xFFFF) * t).toLong())
+        val mb = (((la and 0xFFFF) * t1 + (lb and 0xFFFF) * t).toLong())
+        return linear64ToPixel(
+            (ma shl 48) or ((mr and 0xFFFF) shl 32) or
+            ((mg and 0xFFFF) shl 16) or (mb and 0xFFFF)
         )
     }
 

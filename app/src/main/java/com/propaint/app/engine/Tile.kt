@@ -102,7 +102,8 @@ class TiledSurface(val width: Int, val height: Int) {
     fun sampleColorAt(cx: Int, cy: Int, radius: Int): Int {
         if (radius <= 0) return getPixelAt(cx, cy)
         val r2 = radius * radius
-        var rSum = 0L; var gSum = 0L; var bSum = 0L; var aSum = 0L; var count = 0L
+        // リニアライト空間で平均化 (sRGB 空間の平均は色が濁る)
+        var aSum = 0L; var rSum = 0L; var gSum = 0L; var bSum = 0L; var count = 0L
         val x0 = maxOf(0, cx - radius); val x1 = minOf(width - 1, cx + radius)
         val y0 = maxOf(0, cy - radius); val y1 = minOf(height - 1, cy + radius)
         for (py in y0..y1) {
@@ -110,17 +111,20 @@ class TiledSurface(val width: Int, val height: Int) {
             for (px in x0..x1) {
                 val dx = px - cx
                 if (dx * dx + dy * dy > r2) continue
-                val c = getPixelAt(px, py)
-                aSum += PixelOps.alpha(c); rSum += PixelOps.red(c)
-                gSum += PixelOps.green(c); bSum += PixelOps.blue(c)
+                val lin = PixelOps.pixelToLinear64(getPixelAt(px, py))
+                aSum += (lin ushr 48) and 0xFFFF
+                rSum += (lin ushr 32) and 0xFFFF
+                gSum += (lin ushr 16) and 0xFFFF
+                bSum += lin and 0xFFFF
                 count++
             }
         }
         if (count == 0L) return 0
-        return PixelOps.pack(
-            (aSum / count).toInt(), (rSum / count).toInt(),
-            (gSum / count).toInt(), (bSum / count).toInt(),
-        )
+        val avgLin = ((aSum / count) shl 48) or
+            (((rSum / count) and 0xFFFF) shl 32) or
+            (((gSum / count) and 0xFFFF) shl 16) or
+            ((bSum / count) and 0xFFFF)
+        return PixelOps.linear64ToPixel(avgLin)
     }
 
     /** タイル参照をコピー (CoW 用スナップショット) */
