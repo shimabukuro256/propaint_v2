@@ -7,8 +7,5 @@
 /app/build/
 .DS_Store
 
-# Golden image test diffs (generated on failure, not committed)
-app/testFixtures/diff/
-
 # Claude Code local settings (contains tokens)
 .claude/

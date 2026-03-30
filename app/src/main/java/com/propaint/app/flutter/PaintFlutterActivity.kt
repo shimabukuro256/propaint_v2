@@ -12,11 +12,15 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.lifecycleScope
 import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.engine.PaintDebug
 import com.propaint.app.viewmodel.PaintViewModel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Flutter UI をホストする Activity。
@@ -30,10 +34,17 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
     private var channelHandler: PaintMethodChannelHandler? = null
 
     // エクスポート種別を onActivityResult で区別するためのリクエストコード
+    // Activity 再生成時も SavedInstanceState で保持する
     private var pendingExportFormat: String? = null
+
+    /** onPause で保存済みなら onStop での重複保存を抑制 */
+    private var savedOnPause = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Activity 再生成時に pendingExportFormat を復元
+        pendingExportFormat = savedInstanceState?.getString(KEY_PENDING_FORMAT)
 
         // デバイス RAM に基づいてメモリ設定を初期化
         MemoryConfig.init(this)
@@ -45,6 +56,11 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(KEY_PENDING_FORMAT, pendingExportFormat)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -80,11 +96,11 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
         viewModel.onImportRequest = { type ->
             runOnUiThread { launchImport(type) }
         }
-        // ギャラリーに戻る
+        // ギャラリーに戻る（保存は非同期で完了後に finish）
         viewModel.onReturnToGallery = {
-            runOnUiThread {
+            lifecycleScope.launch(Dispatchers.IO) {
                 viewModel.saveCurrentProject()
-                finish()
+                withContext(Dispatchers.Main) { finish() }
             }
         }
     }
@@ -115,7 +131,12 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
 
     private fun launchImport(type: String) {
         pendingExportFormat = type // reuse field for import type
-        val mimeType = if (type == "image") "image/*" else "*/*"
+        val mimeType = when (type) {
+            "image" -> "image/*"
+            "psd" -> "*/*"       // PSD は image/vnd.adobe.photoshop だが端末によっては未対応
+            "project" -> "*/*"
+            else -> "*/*"
+        }
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             this.type = mimeType
@@ -163,15 +184,25 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
     private fun handleImport(uri: Uri) {
         val type = pendingExportFormat ?: return
         try {
-            contentResolver.openInputStream(uri)?.use { ins ->
+            val success = contentResolver.openInputStream(uri)?.use { ins ->
                 when (type) {
                     "image" -> viewModel.importImageAsLayer(ins)
+                    "psd" -> viewModel.importPsd(ins)
                     "project" -> viewModel.loadProject(ins)
-                    else -> {} // unsupported type — ignore
+                    else -> false
                 }
+            } ?: false
+            val label = when (type) {
+                "image" -> "画像をレイヤーとしてインポート"
+                "psd" -> "PSD をインポート"
+                "project" -> "プロジェクトを読み込み"
+                else -> "インポート"
             }
-            val label = if (type == "image") "画像をレイヤーとしてインポート" else "プロジェクトを読み込み"
-            Toast.makeText(this, "${label}しました", Toast.LENGTH_SHORT).show()
+            if (success) {
+                Toast.makeText(this, "${label}しました", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "${label}に失敗しました", Toast.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
             Toast.makeText(this, "読み込みに失敗: ${e.message}", Toast.LENGTH_SHORT).show()
         }
@@ -186,15 +217,31 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // onResume で savedOnPause フラグをリセット
+        savedOnPause = false
+    }
+
     override fun onPause() {
         super.onPause()
-        viewModel.saveCurrentProject()
+        // 非同期で保存（UI スレッドをブロックしない → ANR 防止）
+        savedOnPause = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            viewModel.saveCurrentProject()
+            PaintDebug.d(PaintDebug.Perf) { "[Lifecycle] onPause save completed" }
+        }
     }
 
     override fun onStop() {
         super.onStop()
-        // onPause 後にクラッシュ/強制終了されるケースに備えて二重に保存
-        viewModel.saveCurrentProject()
+        // onPause で既に保存を開始済みなら重複しない
+        if (!savedOnPause) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                viewModel.saveCurrentProject()
+                PaintDebug.d(PaintDebug.Perf) { "[Lifecycle] onStop save completed" }
+            }
+        }
     }
 
     companion object {
@@ -202,5 +249,6 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
         const val VIEW_TYPE = "paint-gl-canvas"
         private const val RC_EXPORT = 1001
         private const val RC_IMPORT = 1002
+        private const val KEY_PENDING_FORMAT = "pending_export_format"
     }
 }

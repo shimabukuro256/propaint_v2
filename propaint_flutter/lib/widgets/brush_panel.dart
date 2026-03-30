@@ -61,6 +61,15 @@ class BrushPanel extends StatelessWidget {
               onChanged: (v) => channel.setBrushHardness(v),
             ),
 
+            // アンチエイリアシング
+            PanelSlider(
+              label: 'AA',
+              value: '${(state.brushAntiAliasing * 100).round()}%',
+              current: state.brushAntiAliasing,
+              curve: 1.5,
+              onChanged: (v) => channel.setBrushAntiAliasing(v),
+            ),
+
             // 濃度 (対応ブラシのみ)
             if (info.supportsDensity)
               PanelSlider(

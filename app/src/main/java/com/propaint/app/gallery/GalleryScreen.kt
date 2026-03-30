@@ -1,6 +1,9 @@
 package com.propaint.app.gallery
 
 import android.graphics.Bitmap
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -34,6 +37,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -48,11 +54,115 @@ fun GalleryScreen(
     var deleteTarget by remember { mutableStateOf<GalleryItem?>(null) }
     var renameTarget by remember { mutableStateOf<GalleryItem?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var showImportMenu by remember { mutableStateOf(false) }
+    var exportTarget by remember { mutableStateOf<GalleryItem?>(null) }
+    val scope = rememberCoroutineScope()
 
     // サムネイルキャッシュ
     val thumbnails = remember { mutableStateMapOf<String, Bitmap?>() }
 
     fun refresh() { items = repo.listProjects(); thumbnails.clear() }
+
+    // ── インポート用ファイルピッカー ──
+
+    val importImageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val id = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.use { repo.importImage(it) }
+            }
+            if (id != null) {
+                refresh()
+                Toast.makeText(context, "画像をインポートしました", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "インポートに失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val importPsdLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val id = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.use { repo.importPsd(it) }
+            }
+            if (id != null) {
+                refresh()
+                Toast.makeText(context, "PSD をインポートしました", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "PSD のインポートに失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val importProjectLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val id = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.use { repo.importProject(it) }
+            }
+            if (id != null) {
+                refresh()
+                Toast.makeText(context, "プロジェクトをインポートしました", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "インポートに失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // ── エクスポート用ファイルピッカー ──
+
+    var pendingExportId by remember { mutableStateOf<String?>(null) }
+    var pendingExportFormat by remember { mutableStateOf("") }
+
+    val exportFileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        val id = pendingExportId ?: return@rememberLauncherForActivityResult
+        val format = pendingExportFormat
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                context.contentResolver.openOutputStream(uri)?.use { os ->
+                    when (format) {
+                        "png" -> repo.exportPng(id, os)
+                        "jpeg" -> repo.exportJpeg(id, os)
+                        "psd" -> repo.exportPsd(id, os)
+                        "project" -> repo.exportProject(id, os)
+                        else -> false
+                    }
+                } ?: false
+            }
+            val label = when (format) {
+                "png" -> "PNG"; "jpeg" -> "JPEG"; "psd" -> "PSD"; "project" -> "プロジェクト"
+                else -> format
+            }
+            if (ok) {
+                Toast.makeText(context, "$label をエクスポートしました", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "エクスポートに失敗しました", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun launchExport(id: String, format: String, itemName: String) {
+        pendingExportId = id
+        pendingExportFormat = format
+        val ext = when (format) {
+            "png" -> "$itemName.png"
+            "jpeg" -> "$itemName.jpg"
+            "psd" -> "$itemName.psd"
+            "project" -> "$itemName.ppaint"
+            else -> "$itemName.bin"
+        }
+        exportFileLauncher.launch(ext)
+    }
 
     // Activity 復帰時にリフレッシュ (PaintFlutterActivity から戻った際に反映)
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -75,9 +185,45 @@ fun GalleryScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text("ギャラリー", color = Color.White, fontSize = 22.sp)
-                IconButton(onClick = { showNewDialog = true }) {
-                    Icon(Icons.Default.Add, "新規作成", tint = Color(0xFF6CB4EE),
-                        modifier = Modifier.size(32.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // インポートボタン
+                    Box {
+                        IconButton(onClick = { showImportMenu = true }) {
+                            Text("IN", color = Color(0xFF6CB4EE), fontSize = 14.sp)
+                        }
+                        DropdownMenu(
+                            expanded = showImportMenu,
+                            onDismissRequest = { showImportMenu = false },
+                            modifier = Modifier.background(Color(0xFF2A2A2A)),
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("画像 (PNG/JPEG/WebP)", color = Color.White, fontSize = 13.sp) },
+                                onClick = {
+                                    showImportMenu = false
+                                    importImageLauncher.launch(arrayOf("image/png", "image/jpeg", "image/webp"))
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("PSD (Photoshop)", color = Color.White, fontSize = 13.sp) },
+                                onClick = {
+                                    showImportMenu = false
+                                    importPsdLauncher.launch(arrayOf("*/*"))
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("プロジェクト (.ppaint)", color = Color.White, fontSize = 13.sp) },
+                                onClick = {
+                                    showImportMenu = false
+                                    importProjectLauncher.launch(arrayOf("*/*"))
+                                },
+                            )
+                        }
+                    }
+                    // 新規作成ボタン
+                    IconButton(onClick = { showNewDialog = true }) {
+                        Icon(Icons.Default.Add, "新規作成", tint = Color(0xFF6CB4EE),
+                            modifier = Modifier.size(32.dp))
+                    }
                 }
             }
 
@@ -87,13 +233,21 @@ fun GalleryScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("作品がありません", color = Color(0xFF888888), fontSize = 16.sp)
                         Spacer(Modifier.height(16.dp))
-                        Button(
-                            onClick = { showNewDialog = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A5A7C)),
-                        ) {
-                            Icon(Icons.Default.Add, null, Modifier.size(20.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("新しいキャンバス")
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(
+                                onClick = { showNewDialog = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3A5A7C)),
+                            ) {
+                                Icon(Icons.Default.Add, null, Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("新しいキャンバス")
+                            }
+                            Button(
+                                onClick = { showImportMenu = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5A7A3C)),
+                            ) {
+                                Text("インポート")
+                            }
                         }
                     }
                 }
@@ -184,14 +338,14 @@ fun GalleryScreen(
         )
     }
 
-    // 削除確認ダイアログ
+    // 削除/エクスポート確認ダイアログ
     deleteTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             containerColor = Color(0xFF2A2A2A),
             title = { Text(target.name, color = Color.White) },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Button(
                             onClick = {
@@ -214,6 +368,19 @@ fun GalleryScreen(
                             Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("削除", fontSize = 12.sp)
+                        }
+                    }
+                    // エクスポートボタン行
+                    Text("エクスポート", color = Color(0xFFAAAAAA), fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("png" to "PNG", "jpeg" to "JPEG", "psd" to "PSD", "project" to ".ppaint").forEach { (fmt, label) ->
+                            OutlinedButton(
+                                onClick = { deleteTarget = null; launchExport(target.id, fmt, target.name) },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF6CB4EE)),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            ) {
+                                Text(label, fontSize = 11.sp)
+                            }
                         }
                     }
                 }

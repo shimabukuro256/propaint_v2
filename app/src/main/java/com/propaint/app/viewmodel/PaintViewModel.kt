@@ -18,6 +18,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.InputStream
 import java.io.OutputStream
 import kotlin.math.*
@@ -58,6 +60,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var autoSaveJob: Job? = null
     /** ストローク完了後に true にし、自動保存で false に戻す。未変更時は保存をスキップ */
     private var hasUnsavedChanges = false
+    /** 保存処理の排他制御。自動保存とライフサイクル保存の競合を防止 */
+    private val saveMutex = Mutex()
 
     private fun startAutoSave() {
         autoSaveJob?.cancel()
@@ -104,6 +108,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     val waterContent: StateFlow<Float> = _waterContent.asStateFlow()
     private val _blurStrength = MutableStateFlow(0.5f)
     val blurStrength: StateFlow<Float> = _blurStrength.asStateFlow()
+    private val _brushAntiAliasing = MutableStateFlow(1f)
+    val brushAntiAliasing: StateFlow<Float> = _brushAntiAliasing.asStateFlow()
     private val _blurPressureThreshold = MutableStateFlow(0f)
     val blurPressureThreshold: StateFlow<Float> = _blurPressureThreshold.asStateFlow()
     private val _pressureSizeEnabled = MutableStateFlow(true)
@@ -148,7 +154,12 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private val _cursorState = MutableStateFlow(CursorState(0f, 0f, 0f, false))
     val cursorState: StateFlow<CursorState> = _cursorState.asStateFlow()
 
+    private var lastCursorScreenX = 0f
+    private var lastCursorScreenY = 0f
+    private var lastCursorPressure = 1f
+
     private fun updateCursor(screenX: Float, screenY: Float, pressure: Float) {
+        lastCursorScreenX = screenX; lastCursorScreenY = screenY; lastCursorPressure = pressure
         val doc = _document ?: return
         val sw = renderer.surfaceWidth.toFloat(); val sh = renderer.surfaceHeight.toFloat()
         if (sw <= 0 || sh <= 0) return
@@ -158,10 +169,26 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             val minRad = 0.5f
             minRad + (nomRad - minRad) * pressure.coerceIn(0f, 1f)
         } else nomRad
-        _cursorState.value = CursorState(screenX, screenY, rad * fs, true)
+        val screenRadius = rad * fs
+        _cursorState.value = CursorState(screenX, screenY, screenRadius, true)
+        // GL レンダラーにもカーソル状態を反映（Flutter PlatformView でも円が表示される）
+        renderer.cursorX = screenX
+        renderer.cursorY = screenY
+        renderer.cursorRadius = screenRadius
+        renderer.cursorVisible = true
     }
 
-    private fun hideCursor() { _cursorState.value = _cursorState.value.copy(visible = false) }
+    /** ブラシサイズ変更時にカーソルを再計算 (ホバー中のみ) */
+    private fun refreshCursorSize() {
+        if (_cursorState.value.visible) {
+            updateCursor(lastCursorScreenX, lastCursorScreenY, lastCursorPressure)
+        }
+    }
+
+    private fun hideCursor() {
+        _cursorState.value = _cursorState.value.copy(visible = false)
+        renderer.cursorVisible = false
+    }
 
     // View transform
     private var _zoom = 1f; private var _panX = 0f; private var _panY = 0f; private var _rotation = 0f
@@ -201,7 +228,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val size: Float, val opacity: Float, val hardness: Float,
         val density: Float, val spacing: Float, val stabilizer: Float,
         val colorStretch: Float, val waterContent: Float, val blurStrength: Float,
-        val blurPressureThreshold: Float = 0f,
+        val blurPressureThreshold: Float = 0f, val antiAliasing: Float = 1f,
         val pressureSize: Boolean, val pressureOpacity: Boolean,
         val pressureDensity: Boolean,
     )
@@ -223,6 +250,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     waterContent = prefs.getFloat("${prefix}waterContent", 0f),
                     blurStrength = prefs.getFloat("${prefix}blurStrength", 0.5f),
                     blurPressureThreshold = prefs.getFloat("${prefix}blurPressureThreshold", 0f),
+                    antiAliasing = prefs.getFloat("${prefix}antiAliasing", 1f),
                     pressureSize = prefs.getBoolean("${prefix}pressureSize", true),
                     pressureOpacity = prefs.getBoolean("${prefix}pressureOpacity", false),
                     pressureDensity = prefs.getBoolean("${prefix}pressureDensity", false),
@@ -243,6 +271,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _brushSpacing.value = saved.spacing; _brushStabilizer.value = saved.stabilizer
             _colorStretch.value = saved.colorStretch; _waterContent.value = saved.waterContent
             _blurStrength.value = saved.blurStrength; _blurPressureThreshold.value = saved.blurPressureThreshold
+            _brushAntiAliasing.value = saved.antiAliasing
             _pressureSizeEnabled.value = saved.pressureSize
             _pressureOpacityEnabled.value = saved.pressureOpacity
             _pressureDensityEnabled.value = saved.pressureDensity
@@ -279,6 +308,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 .putFloat("${prefix}waterContent", _waterContent.value)
                 .putFloat("${prefix}blurStrength", _blurStrength.value)
                 .putFloat("${prefix}blurPressureThreshold", _blurPressureThreshold.value)
+                .putFloat("${prefix}antiAliasing", _brushAntiAliasing.value)
                 .putBoolean("${prefix}pressureSize", _pressureSizeEnabled.value)
                 .putBoolean("${prefix}pressureOpacity", _pressureOpacityEnabled.value)
                 .putBoolean("${prefix}pressureDensity", _pressureDensityEnabled.value)
@@ -303,6 +333,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             .putFloat("${prefix}waterContent", _waterContent.value)
             .putFloat("${prefix}blurStrength", _blurStrength.value)
             .putFloat("${prefix}blurPressureThreshold", _blurPressureThreshold.value)
+            .putFloat("${prefix}antiAliasing", _brushAntiAliasing.value)
             .putBoolean("${prefix}pressureSize", _pressureSizeEnabled.value)
             .putBoolean("${prefix}pressureOpacity", _pressureOpacityEnabled.value)
             .putBoolean("${prefix}pressureDensity", _pressureDensityEnabled.value)
@@ -314,13 +345,16 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun initCanvas(width: Int, height: Int) {
         val doc = CanvasDocument(width, height)
         _document = doc; renderer.document = doc; updateLayerState()
+        // 名前なしでもプロジェクトを自動作成して保存可能にする
+        ensureProjectId(width, height)
         startAutoSave()
     }
 
     /** ギャラリーから新規プロジェクトを作成して開く */
     fun openNewProject(name: String, width: Int, height: Int) {
         saveCurrentProject()
-        val id = galleryRepo.createProject(name, width, height)
+        val uniqueName = galleryRepo.generateUniqueName(name)
+        val id = galleryRepo.createProject(uniqueName, width, height)
         val doc = galleryRepo.loadProject(id)
         if (doc != null) {
             _document = doc; renderer.document = doc; currentProjectId = id
@@ -342,11 +376,42 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 現在のプロジェクトを保存 */
-    fun saveCurrentProject() {
-        val id = currentProjectId ?: return
+    /**
+     * currentProjectId が未設定の場合、自動で新規プロジェクトを作成して ID を付与する。
+     * これにより名前なしキャンバスでも自動保存・ライフサイクル保存が機能する。
+     * synchronized で多重呼び出しによる重複作成を防止。
+     */
+    @Synchronized
+    private fun ensureProjectId(width: Int, height: Int) {
+        if (currentProjectId != null) return
         val doc = _document ?: return
+        val name = galleryRepo.generateUniqueName("無題")
+        val id = galleryRepo.createProject(name, width, height)
+        // createProject は空の CanvasDocument を作成するが、
+        // 既に initCanvas で作成済みの doc を使いたいので上書き保存する
         galleryRepo.saveProject(id, doc)
+        currentProjectId = id
+        PaintDebug.d(PaintDebug.Layer) { "[ViewModel] auto-created project id=$id name=$name" }
+    }
+
+    /** 現在のプロジェクトを保存（Mutex で排他制御） */
+    fun saveCurrentProject() {
+        val doc = _document ?: return
+        // currentProjectId が null なら自動でプロジェクトを作成
+        if (currentProjectId == null) {
+            ensureProjectId(doc.width, doc.height)
+        }
+        val id = currentProjectId ?: return
+        // saveMutex.tryLock で二重実行を防止（ブロッキング回避）
+        if (!saveMutex.tryLock()) {
+            PaintDebug.d(PaintDebug.Perf) { "[Save] skipped — another save in progress" }
+            return
+        }
+        try {
+            galleryRepo.saveProject(id, doc)
+        } finally {
+            saveMutex.unlock()
+        }
     }
 
     /** ギャラリーに戻る前に保存してドキュメントをクリア */
@@ -366,7 +431,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _brushSize.value, _brushOpacity.value, _brushHardness.value,
             _brushDensity.value, _brushSpacing.value, _brushStabilizer.value,
             _colorStretch.value, _waterContent.value, _blurStrength.value,
-            _blurPressureThreshold.value,
+            _blurPressureThreshold.value, _brushAntiAliasing.value,
             _pressureSizeEnabled.value, _pressureOpacityEnabled.value,
             _pressureDensityEnabled.value,
         )
@@ -379,6 +444,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _brushSpacing.value = saved.spacing; _brushStabilizer.value = saved.stabilizer
             _colorStretch.value = saved.colorStretch; _waterContent.value = saved.waterContent
             _blurStrength.value = saved.blurStrength; _blurPressureThreshold.value = saved.blurPressureThreshold
+            _brushAntiAliasing.value = saved.antiAliasing
             _pressureSizeEnabled.value = saved.pressureSize
             _pressureOpacityEnabled.value = saved.pressureOpacity
             _pressureDensityEnabled.value = saved.pressureDensity
@@ -394,6 +460,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _pressureDensityEnabled.value = false
         }
         persistCurrentBrushImmediate()
+        refreshCursorSize()
     }
 
     private fun applyDefaults(type: BrushType) {
@@ -444,7 +511,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setBrushSize(v: Float) { _brushSize.value = v.coerceIn(1f, 2000f); persistCurrentBrush() }
+    fun setBrushSize(v: Float) { _brushSize.value = v.coerceIn(1f, 2000f); persistCurrentBrush(); refreshCursorSize() }
     fun setBrushOpacity(v: Float) { _brushOpacity.value = v.coerceIn(0.01f, 1f); persistCurrentBrush() }
     fun setBrushHardness(v: Float) { _brushHardness.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setBrushDensity(v: Float) { _brushDensity.value = v.coerceIn(0.01f, 1f); persistCurrentBrush() }
@@ -453,8 +520,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun setWaterContent(v: Float) { _waterContent.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setBlurStrength(v: Float) { _blurStrength.value = v.coerceIn(0.05f, 1f); persistCurrentBrush() }
     fun setStabilizer(v: Float) { _brushStabilizer.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
+    fun setBrushAntiAliasing(v: Float) { _brushAntiAliasing.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setBlurPressureThreshold(v: Float) { _blurPressureThreshold.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
-    fun togglePressureSize() { _pressureSizeEnabled.value = !_pressureSizeEnabled.value; persistCurrentBrush() }
+    fun togglePressureSize() { _pressureSizeEnabled.value = !_pressureSizeEnabled.value; persistCurrentBrush(); refreshCursorSize() }
     fun togglePressureOpacity() { _pressureOpacityEnabled.value = !_pressureOpacityEnabled.value; persistCurrentBrush() }
     fun togglePressureDensity() { _pressureDensityEnabled.value = !_pressureDensityEnabled.value; persistCurrentBrush() }
     /** 現在の描画色を変更する (履歴には追加しない。ドラッグ中等のリアルタイム更新用) */
@@ -523,7 +591,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _brushSize.value, _brushOpacity.value, _brushHardness.value,
             _brushDensity.value, _brushSpacing.value, _brushStabilizer.value,
             _colorStretch.value, _waterContent.value, _blurStrength.value,
-            _blurPressureThreshold.value,
+            _blurPressureThreshold.value, _brushAntiAliasing.value,
             _pressureSizeEnabled.value, _pressureOpacityEnabled.value,
             _pressureDensityEnabled.value,
         )
@@ -537,6 +605,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 "density": ${s.density}, "spacing": ${s.spacing}, "stabilizer": ${s.stabilizer},
                 "colorStretch": ${s.colorStretch}, "waterContent": ${s.waterContent},
                 "blurStrength": ${s.blurStrength}, "blurPressureThreshold": ${s.blurPressureThreshold},
+                "antiAliasing": ${s.antiAliasing},
                 "pressureSize": ${s.pressureSize}, "pressureOpacity": ${s.pressureOpacity},
                 "pressureDensity": ${s.pressureDensity}
             }""".trimIndent()
@@ -564,6 +633,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     waterContent = obj.optDouble("waterContent", 0.0).toFloat(),
                     blurStrength = obj.optDouble("blurStrength", 0.5).toFloat(),
                     blurPressureThreshold = obj.optDouble("blurPressureThreshold", 0.0).toFloat(),
+                    antiAliasing = obj.optDouble("antiAliasing", 1.0).toFloat(),
                     pressureSize = obj.optBoolean("pressureSize", true),
                     pressureOpacity = obj.optBoolean("pressureOpacity", false),
                     pressureDensity = obj.optBoolean("pressureDensity", false),
@@ -577,6 +647,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 _brushSpacing.value = saved.spacing; _brushStabilizer.value = saved.stabilizer
                 _colorStretch.value = saved.colorStretch; _waterContent.value = saved.waterContent
                 _blurStrength.value = saved.blurStrength; _blurPressureThreshold.value = saved.blurPressureThreshold
+                _brushAntiAliasing.value = saved.antiAliasing
                 _pressureSizeEnabled.value = saved.pressureSize
                 _pressureOpacityEnabled.value = saved.pressureOpacity
                 _pressureDensityEnabled.value = saved.pressureDensity
@@ -707,6 +778,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             taperEnabled = type != BrushType.Eraser,
             waterContent = waterCont,
             colorStretch = colStretch,
+            antiAliasing = _brushAntiAliasing.value,
             stabilizer = _brushStabilizer.value,
             sublayerFilter = subFilter,
             filterRadiusScale = filterScale,

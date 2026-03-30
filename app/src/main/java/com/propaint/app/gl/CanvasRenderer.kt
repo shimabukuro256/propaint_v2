@@ -25,7 +25,14 @@ class CanvasRenderer : GLSurfaceView.Renderer {
     var surfaceWidth = 0; private set
     var surfaceHeight = 0; private set
 
+    // ── ブラシカーソル状態 (ViewModel から設定される) ──
+    @Volatile var cursorX = 0f
+    @Volatile var cursorY = 0f
+    @Volatile var cursorRadius = 0f
+    @Volatile var cursorVisible = false
+
     private lateinit var quadProg: GlProgram
+    private lateinit var cursorProg: GlProgram
     private var canvasTexId = 0; private var canvasTexW = 0; private var canvasTexH = 0
     private var uploadBuffer: ByteBuffer? = null
 
@@ -35,6 +42,7 @@ class CanvasRenderer : GLSurfaceView.Renderer {
         PaintDebug.d(PaintDebug.GL) { "[onSurfaceCreated] resetting textures, old texId=$canvasTexId" }
         canvasTexId = 0; canvasTexW = 0; canvasTexH = 0
         quadProg = GlProgram(Shaders.QUAD_VERT, Shaders.QUAD_FRAG)
+        cursorProg = GlProgram(Shaders.CURSOR_VERT, Shaders.CURSOR_FRAG)
     }
 
     override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
@@ -67,6 +75,9 @@ class CanvasRenderer : GLSurfaceView.Renderer {
 
         GLES20.glClearColor(0.16f, 0.16f, 0.16f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         drawCanvasToScreen(dw, dh)
+        if (cursorVisible && cursorRadius > 0.5f) {
+            drawCursorCircle()
+        }
     }
 
     private fun createTexture(w: Int, h: Int): Int {
@@ -152,12 +163,57 @@ class CanvasRenderer : GLSurfaceView.Renderer {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 
+    // ── ブラシカーソル円の描画 ─────────────────────────────────────
+
+    private fun drawCursorCircle() {
+        val cx = cursorX; val cy = cursorY; val r = cursorRadius
+        val sw = surfaceWidth.toFloat(); val sh = surfaceHeight.toFloat()
+        if (sw <= 0f || sh <= 0f) return
+
+        // 円の頂点を生成
+        val verts = FloatArray(CIRCLE_SEGMENTS * 2)
+        val step = (2.0 * Math.PI / CIRCLE_SEGMENTS).toFloat()
+        for (i in 0 until CIRCLE_SEGMENTS) {
+            val angle = i * step
+            verts[i * 2] = cx + r * cos(angle)
+            verts[i * 2 + 1] = cy + r * sin(angle)
+        }
+
+        val mvp = FloatArray(16); ortho(mvp, 0f, sw, sh, 0f)
+        val buf = verts.toFloatBuffer()
+
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glLineWidth(2.5f)
+
+        cursorProg.use()
+        GLES20.glUniformMatrix4fv(cursorProg.uniform("uMVP"), 1, false, mvp, 0)
+        val aPos = cursorProg.attrib("aPos")
+        GLES20.glEnableVertexAttribArray(aPos)
+        buf.position(0)
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, buf)
+
+        // 黒の外枠
+        GLES20.glUniform4f(cursorProg.uniform("uColor"), 0f, 0f, 0f, 0.7f)
+        GLES20.glDrawArrays(GLES20.GL_LINE_LOOP, 0, CIRCLE_SEGMENTS)
+
+        // 白の内枠 (少し細い半径で)
+        GLES20.glLineWidth(1.2f)
+        GLES20.glUniform4f(cursorProg.uniform("uColor"), 1f, 1f, 1f, 0.9f)
+        GLES20.glDrawArrays(GLES20.GL_LINE_LOOP, 0, CIRCLE_SEGMENTS)
+
+        GLES20.glDisableVertexAttribArray(aPos)
+    }
+
     fun cleanup() {
         if (canvasTexId != 0) GLES20.glDeleteTextures(1, intArrayOf(canvasTexId), 0)
         if (::quadProg.isInitialized) quadProg.delete()
+        if (::cursorProg.isInitialized) cursorProg.delete()
     }
 
     companion object {
+        private const val CIRCLE_SEGMENTS = 64
+
         fun ortho(m: FloatArray, l: Float, r: Float, b: Float, t: Float) {
             val rw = 2f / (r - l); val rh = 2f / (t - b)
             m[0] = rw; m[4] = 0f; m[8] = 0f; m[12] = -(r + l) / (r - l)

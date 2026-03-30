@@ -27,6 +27,7 @@ fun BrushPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier: Modif
     val density by viewModel.brushDensity.collectAsState()
     val spacing by viewModel.brushSpacing.collectAsState()
     val stabilizer by viewModel.brushStabilizer.collectAsState()
+    val antiAliasing by viewModel.brushAntiAliasing.collectAsState()
     val blurPressureThreshold by viewModel.blurPressureThreshold.collectAsState()
     val pressureSize by viewModel.pressureSizeEnabled.collectAsState()
     val pressureOpacity by viewModel.pressureOpacityEnabled.collectAsState()
@@ -69,6 +70,7 @@ fun BrushPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier: Modif
                 ParamSlider("不透明度", "${(opacity * 100).toInt()}%", opacity, 0.01f..1f) { viewModel.setBrushOpacity(it) }
             }
             ParamSlider("硬さ", "${(hardness * 100).toInt()}%", hardness, 0f..1f) { viewModel.setBrushHardness(it) }
+            ParamSlider("AA", "${(antiAliasing * 100).toInt()}%", antiAliasing, 0f..1f) { viewModel.setBrushAntiAliasing(it) }
             if (type.supportsDensity) {
                 ParamSlider("濃度", "${(density * 100).toInt()}%", density, 0.01f..1f) { viewModel.setBrushDensity(it) }
             }

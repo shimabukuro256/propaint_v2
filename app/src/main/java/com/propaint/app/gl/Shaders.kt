@@ -30,6 +30,24 @@ object Shaders {
         }
     """
 
+    /** ブラシカーソル円用バーテックスシェーダー（単色ライン） */
+    const val CURSOR_VERT = """
+        uniform mat4 uMVP;
+        attribute vec2 aPos;
+        void main() {
+            gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+        }
+    """
+
+    /** ブラシカーソル円用フラグメントシェーダー（単色） */
+    const val CURSOR_FRAG = """
+        precision mediump float;
+        uniform vec4 uColor;
+        void main() {
+            gl_FragColor = uColor;
+        }
+    """
+
     /** チェッカーボード背景 (透明表示用) */
     const val CHECKER_FRAG = """
         precision mediump float;

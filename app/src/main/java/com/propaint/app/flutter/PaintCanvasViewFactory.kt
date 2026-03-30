@@ -2,6 +2,7 @@ package com.propaint.app.flutter
 
 import android.content.Context
 import android.view.View
+import com.propaint.app.engine.PaintDebug
 import com.propaint.app.gl.CanvasRenderer
 import com.propaint.app.gl.PaintGlSurfaceView
 import com.propaint.app.viewmodel.PaintViewModel
@@ -37,9 +38,22 @@ private class PaintCanvasPlatformView(
         onHoverCallback = { event -> viewModel.onHoverEvent(event) }
     }
 
+    private var disposed = false
+
     override fun getView(): View = glView
 
     override fun dispose() {
-        // GLSurfaceView のライフサイクルは Activity に委譲
+        if (disposed) return
+        disposed = true
+        PaintDebug.d(PaintDebug.GL) { "[PlatformView] dispose — releasing GLSurfaceView" }
+        // コールバック参照を解除してリーク防止
+        glView.onTouchCallback = null
+        glView.onHoverCallback = null
+        // GL スレッドで GL リソースを解放してから View を停止
+        glView.queueEvent {
+            viewModel.renderer.cleanup()
+            PaintDebug.d(PaintDebug.GL) { "[PlatformView] GL resources released" }
+        }
+        glView.onPause()
     }
 }

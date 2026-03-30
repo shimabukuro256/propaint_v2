@@ -83,12 +83,26 @@ object ProjectFile {
      * @return 復元された CanvasDocument、読み込み失敗時は null
      */
     fun load(input: InputStream): CanvasDocument? {
+        try {
+            return loadInternal(input)
+        } catch (e: Exception) {
+            PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] failed: ${e::class.simpleName}: ${e.message}")
+            return null
+        }
+    }
+
+    private fun loadInternal(input: InputStream): CanvasDocument? {
         val entries = HashMap<String, ByteArray>()
 
         // ZIP エントリを全てメモリに読み込み
         val zis = ZipInputStream(input)
         var entry = zis.nextEntry
         while (entry != null) {
+            if (entry.size > 256 * 1024 * 1024) {
+                PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] entry too large: ${entry.name} size=${entry.size}")
+                zis.close()
+                return null
+            }
             val bos = ByteArrayOutputStream()
             val buf = ByteArray(8192)
             var n: Int
@@ -113,14 +127,18 @@ object ProjectFile {
             return null
         }
 
-        val width = meta.getInt("width")
-        val height = meta.getInt("height")
-        val activeLayerId = meta.getInt("activeLayerId")
-        val layersJson = meta.getJSONArray("layers")
+        val width = meta.optInt("width", 0)
+        val height = meta.optInt("height", 0)
+        val activeLayerId = meta.optInt("activeLayerId", 1)
+        val layersJson = meta.optJSONArray("layers")
 
         // 防御的チェック
         if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
             PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] invalid canvas size: ${width}x${height}")
+            return null
+        }
+        if (layersJson == null || layersJson.length() == 0) {
+            PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] no layers in meta")
             return null
         }
 
@@ -133,12 +151,12 @@ object ProjectFile {
         var maxId = 0
 
         for (i in 0 until layersJson.length()) {
-            val lj = layersJson.getJSONObject(i)
-            val id = lj.getInt("id")
+            val lj = layersJson.optJSONObject(i) ?: continue
+            val id = lj.optInt("id", i + 1)
             if (id > maxId) maxId = id
-            val name = lj.getString("name")
-            val opacity = lj.getDouble("opacity").toFloat()
-            val blendMode = lj.getInt("blendMode")
+            val name = lj.optString("name", "レイヤー ${i + 1}")
+            val opacity = lj.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f)
+            val blendMode = lj.optInt("blendMode", 0)
             val isVisible = lj.optBoolean("isVisible", true)
             val isLocked = lj.optBoolean("isLocked", false)
             val isClip = lj.optBoolean("isClipToBelow", false)
@@ -148,11 +166,17 @@ object ProjectFile {
             val pngBytes = entries["layer_${id}.png"]
             val surface = TiledSurface(width, height)
             if (pngBytes != null) {
-                val bmp = BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size)
+                val bmp = try {
+                    BitmapFactory.decodeByteArray(pngBytes, 0, pngBytes.size)
+                } catch (e: Exception) {
+                    PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] bitmap decode failed for layer $id: ${e.message}")
+                    null
+                }
                 if (bmp != null) {
+                    val bmpW = minOf(bmp.width, width)
+                    val bmpH = minOf(bmp.height, height)
                     val px = IntArray(width * height)
-                    bmp.getPixels(px, 0, width, 0, 0,
-                        minOf(bmp.width, width), minOf(bmp.height, height))
+                    bmp.getPixels(px, 0, width, 0, 0, bmpW, bmpH)
                     bmp.recycle()
                     // straight alpha → premultiplied に変換してタイルに書き込み
                     writePremultipliedToSurface(surface, px, width, height)
@@ -164,7 +188,7 @@ object ProjectFile {
         }
 
         if (loadedLayers.isEmpty()) {
-            PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] no layers found")
+            PaintDebug.e(PaintDebug.Layer, "[ProjectFile.load] no layers loaded")
             return null
         }
 

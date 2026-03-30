@@ -11,8 +11,10 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 
 /**
  * Flutter ↔ Kotlin MethodChannel / EventChannel ハンドラ。
@@ -98,6 +100,13 @@ class PaintMethodChannelHandler(
                     ?: return result.error("INVALID_ARG", "value is required", null)
                 check(v in 0f..1f) { "hardness must be in 0..1" }
                 viewModel.setBrushHardness(v)
+                result.success(null)
+            }
+            "setBrushAntiAliasing" -> {
+                val v = call.argument<Double>("value")?.toFloat()
+                    ?: return result.error("INVALID_ARG", "value is required", null)
+                check(v in 0f..1f) { "antiAliasing must be in 0..1" }
+                viewModel.setBrushAntiAliasing(v)
                 result.success(null)
             }
             "setBrushDensity" -> {
@@ -191,16 +200,14 @@ class PaintMethodChannelHandler(
                     ?: return result.error("INVALID_ARG", "id is required", null)
                 val opacity = call.argument<Double>("opacity")?.toFloat()
                     ?: return result.error("INVALID_ARG", "opacity is required", null)
-                viewModel.setLayerOpacity(id, opacity)
-                result.success(null)
+                launchHeavy(result) { viewModel.setLayerOpacity(id, opacity) }
             }
             "setLayerBlendMode" -> {
                 val id = call.argument<Int>("id")
                     ?: return result.error("INVALID_ARG", "id is required", null)
                 val mode = call.argument<Int>("mode")
                     ?: return result.error("INVALID_ARG", "mode is required", null)
-                viewModel.setLayerBlendMode(id, mode)
-                result.success(null)
+                launchHeavy(result) { viewModel.setLayerBlendMode(id, mode) }
             }
             "setLayerClip" -> {
                 val id = call.argument<Int>("id")
@@ -247,14 +254,12 @@ class PaintMethodChannelHandler(
             "moveLayerUp" -> {
                 val id = call.argument<Int>("id")
                     ?: return result.error("INVALID_ARG", "id is required", null)
-                viewModel.moveLayerUp(id)
-                result.success(null)
+                launchHeavy(result) { viewModel.moveLayerUp(id) }
             }
             "moveLayerDown" -> {
                 val id = call.argument<Int>("id")
                     ?: return result.error("INVALID_ARG", "id is required", null)
-                viewModel.moveLayerDown(id)
-                result.success(null)
+                launchHeavy(result) { viewModel.moveLayerDown(id) }
             }
 
             "batchMergeLayers" -> {
@@ -311,43 +316,107 @@ class PaintMethodChannelHandler(
 
     private var stateObserverJob: Job? = null
 
+    /** 前回送信した状態マップ。差分検出に使用 */
+    private var lastSentState: Map<String, Any?> = emptyMap()
+
     @OptIn(FlowPreview::class)
     private fun startStateObserver() {
         stateObserverJob?.cancel()
         stateObserverJob = scope.launch {
-            // 全 StateFlow を merge し、どれか1つが変化すれば debounce 後に全状態を push
-            merge(
-                viewModel.brushSize,
-                viewModel.brushOpacity,
-                viewModel.brushHardness,
-                viewModel.brushDensity,
-                viewModel.brushSpacing,
-                viewModel.brushStabilizer,
-                viewModel.colorStretch,
-                viewModel.waterContent,
-                viewModel.blurStrength,
-                viewModel.blurPressureThreshold,
-                viewModel.currentBrushType,
-                viewModel.pressureSizeEnabled,
-                viewModel.pressureOpacityEnabled,
-                viewModel.pressureDensityEnabled,
-                viewModel.currentColor,
-                viewModel.colorHistory,
-                viewModel.canUndo,
-                viewModel.canRedo,
-                viewModel.toolMode,
-                viewModel.isDrawing,
-                viewModel.layers,
-            )
-                .debounce(16L)
-                .collect {
-                    // buildStateMap は重いレイヤースタックでコストがかかるため
-                    // Default ディスパッチャで構築し Main で送信
-                    val stateMap = withContext(Dispatchers.Default) {
-                        buildStateMap()
-                    }
-                    eventSink?.success(stateMap)
-                }
+            // ── ブラシ設定 (軽量): sample で一定間隔の最新値を発行 ──
+            launch {
+                combine(
+                    viewModel.brushSize,
+                    viewModel.brushOpacity,
+                    viewModel.brushHardness,
+                    viewModel.brushDensity,
+                    viewModel.brushSpacing,
+                ) { _ -> "brush" }
+                    .sample(32L)
+                    .collect { sendDiff() }
+            }
+            // ── ブラシ追加設定 ──
+            launch {
+                combine(
+                    viewModel.brushStabilizer,
+                    viewModel.colorStretch,
+                    viewModel.waterContent,
+                    viewModel.blurStrength,
+                    viewModel.blurPressureThreshold,
+                ) { _ -> "brush_ext" }
+                    .sample(32L)
+                    .collect { sendDiff() }
+            }
+            // ── ブラシタイプ・筆圧トグル (低頻度: 変更時のみ) ──
+            launch {
+                combine(
+                    viewModel.currentBrushType,
+                    viewModel.pressureSizeEnabled,
+                    viewModel.pressureOpacityEnabled,
+                    viewModel.pressureDensityEnabled,
+                ) { _ -> "brush_type" }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+            // ── カラー (変更時のみ) ──
+            launch {
+                viewModel.currentColor
+                    .map { it }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+            // ── カラーヒストリー (変更時のみ) ──
+            launch {
+                viewModel.colorHistory
+                    .map { it }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+            // ── Undo/Redo 状態 (変更時のみ) ──
+            launch {
+                combine(
+                    viewModel.canUndo,
+                    viewModel.canRedo,
+                ) { a, b -> Pair(a, b) }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+            // ── ツールモード・描画中フラグ (変更時のみ) ──
+            launch {
+                combine(
+                    viewModel.toolMode,
+                    viewModel.isDrawing,
+                ) { a, b -> Pair(a, b) }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+            // ── レイヤー (変更時のみ — 重いデータ) ──
+            launch {
+                viewModel.layers
+                    .map { it }
+                    .distinctUntilChanged()
+                    .collect { sendDiff() }
+            }
+        }
+    }
+
+    /**
+     * 現在の状態マップを構築し、前回送信分と差分がある項目のみ送信する。
+     * Flutter 側は copyWithMap で部分更新するため、変更のあるキーだけ送れば十分。
+     */
+    private suspend fun sendDiff() {
+        val fullMap = withContext(Dispatchers.Default) { buildStateMap() }
+        val diff = mutableMapOf<String, Any?>()
+        for ((key, value) in fullMap) {
+            if (lastSentState[key] != value) {
+                diff[key] = value
+            }
+        }
+        if (diff.isNotEmpty()) {
+            lastSentState = fullMap
+            withContext(Dispatchers.Main) {
+                eventSink?.success(diff)
+            }
         }
     }
 
@@ -382,6 +451,7 @@ class PaintMethodChannelHandler(
             "brushSize" to viewModel.brushSize.value.toDouble(),
             "brushOpacity" to viewModel.brushOpacity.value.toDouble(),
             "brushHardness" to viewModel.brushHardness.value.toDouble(),
+            "brushAntiAliasing" to viewModel.brushAntiAliasing.value.toDouble(),
             "brushDensity" to viewModel.brushDensity.value.toDouble(),
             "brushSpacing" to viewModel.brushSpacing.value.toDouble(),
             "stabilizer" to viewModel.brushStabilizer.value.toDouble(),

@@ -5,6 +5,7 @@ class PaintState {
   final double brushSize;
   final double brushOpacity;
   final double brushHardness;
+  final double brushAntiAliasing;
   final double brushDensity;
   final double brushSpacing;
   final double stabilizer;
@@ -28,6 +29,7 @@ class PaintState {
     this.brushSize = 10.0,
     this.brushOpacity = 1.0,
     this.brushHardness = 1.0,
+    this.brushAntiAliasing = 1.0,
     this.brushDensity = 1.0,
     this.brushSpacing = 0.06,
     this.stabilizer = 0.0,
@@ -53,6 +55,7 @@ class PaintState {
       brushSize: (m['brushSize'] as num?)?.toDouble() ?? brushSize,
       brushOpacity: (m['brushOpacity'] as num?)?.toDouble() ?? brushOpacity,
       brushHardness: (m['brushHardness'] as num?)?.toDouble() ?? brushHardness,
+      brushAntiAliasing: (m['brushAntiAliasing'] as num?)?.toDouble() ?? brushAntiAliasing,
       brushDensity: (m['brushDensity'] as num?)?.toDouble() ?? brushDensity,
       brushSpacing: (m['brushSpacing'] as num?)?.toDouble() ?? brushSpacing,
       stabilizer: (m['stabilizer'] as num?)?.toDouble() ?? stabilizer,

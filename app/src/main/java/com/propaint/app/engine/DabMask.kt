@@ -1,6 +1,7 @@
 package com.propaint.app.engine
 
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -18,6 +19,11 @@ class DabMask(
 
 /**
  * LUT ベースのダブマスク生成。Drawpile paint.c generate_classic_lut / get_mask 準拠。
+ *
+ * サブピクセル精度:
+ *   マスク中心に cx/cy の小数部を反映し、各ピクセルの距離を正確に計算。
+ *   LUT 参照を線形補間し、整数切り捨てによる階段ノイズを除去。
+ *   これにより細線でもブレゼンハム的ジャギーが発生しない。
  *
  * 大ブラシ (直径 > MAX_DAB_DIAMETER) ではダウンスケールした小さなマスクを生成し、
  * applyDabToTile 側でスケール係数を適用する。これにより OOM/GC 暴発を防止。
@@ -46,7 +52,17 @@ object DabMaskGenerator {
         lutCache[idx] = lut; return lut
     }
 
-    fun createDab(cx: Float, cy: Float, radius: Float, hardness: Float): DabMask? {
+    /** LUT の線形補間参照。整数添字の切り捨てによる階段状ノイズを除去。 */
+    private fun lutLerp(lut: IntArray, dist: Float): Int {
+        if (dist < 0f) return 255
+        val idx = dist.toInt()
+        if (idx >= LUT_SIZE - 1) return 0
+        val frac = dist - idx
+        return (lut[idx] + (lut[idx + 1] - lut[idx]) * frac).toInt().coerceIn(0, 255)
+    }
+
+    fun createDab(cx: Float, cy: Float, radius: Float, hardness: Float,
+                  antiAliasing: Float = 1f): DabMask? {
         if (radius < 0.5f) return null
         // 防御的チェック: NaN/Infinity 防止
         if (cx.isNaN() || cx.isInfinite() || cy.isNaN() || cy.isInfinite()) {
@@ -60,56 +76,111 @@ object DabMaskGenerator {
         if (hardness !in 0f..1f) {
             PaintDebug.assertFail("DabMask hardness out of range: $hardness")
         }
+        val safeAA = antiAliasing.coerceIn(0f, 1f)
         val hi = (hardness * 100f).toInt().coerceIn(0, 100)
         val lut = generateLut(hi)
         val r = radius / 2f
-        if (r < 1f) {
-            val data = IntArray(9); data[4] = 255
-            return DabMask(cx.toInt() - 1, cy.toInt() - 1, 3, data)
-        }
 
         // ── 大ブラシ: ダウンスケール生成 ──
         val rawD = ceil(radius).toInt() + 2
         val actualD = if (rawD % 2 == 0) rawD + 1 else rawD
 
         if (actualD > MAX_DAB_DIAMETER) {
-            // 縮小倍率を計算し、小さなマスクを生成
             val scale = MAX_DAB_DIAMETER.toFloat() / actualD
             val scaledR = r * scale
             val sd = MAX_DAB_DIAMETER
-            val sOff = -0.5f
-            val sFudge = 1f
+            val left = floor(cx - actualD / 2f).toInt()
+            val top = floor(cy - actualD / 2f).toInt()
+            // サブピクセル中心 (スケール済み座標系)
+            val localCx = (cx - left) * scale
+            val localCy = (cy - top) * scale
             val sLs = ((LUT_RADIUS - 1f) / scaledR).let { it * it }
             val data = IntArray(sd * sd)
+            // AA 帯域幅
+            val aaW = if (safeAA > 0f) safeAA * maxOf(0.7f, minOf(scaledR * 0.2f, 3f)) else 0f
+            val rMaaSq = if (aaW > 0f) (scaledR - aaW).coerceAtLeast(0f).let { it * it } else 0f
+            val rPaaSq = if (aaW > 0f) (scaledR + aaW).let { it * it } else 0f
             for (y in 0 until sd) {
-                val yy = (y - scaledR + sOff).let { it * it }
+                val dy = (y + 0.5f) - localCy
+                val dySq = dy * dy
                 val ro = y * sd
                 for (x in 0 until sd) {
-                    val dist = ((x - scaledR + sOff).let { it * it } + yy) * sFudge * sLs
-                    data[ro + x] = if (dist.toInt() < LUT_SIZE) lut[dist.toInt()] else 0
+                    val dx = (x + 0.5f) - localCx
+                    val distSq = dx * dx + dySq
+                    var v = lutLerp(lut, distSq * sLs)
+                    // AA エッジフェード
+                    if (aaW > 0f && distSq > rMaaSq) {
+                        if (distSq >= rPaaSq) { v = 0 }
+                        else {
+                            val signedDist = scaledR - sqrt(distSq)
+                            val t = ((signedDist + aaW) / (2f * aaW)).coerceIn(0f, 1f)
+                            v = (v * t * t * (3f - 2f * t)).toInt().coerceIn(0, 255)
+                        }
+                    }
+                    data[ro + x] = v
                 }
             }
-            // DabMask の left/top は実際のブラシサイズに基づいて配置
-            return DabMask(
-                (cx - actualD / 2f).toInt(), (cy - actualD / 2f).toInt(),
-                sd, data, scale = scale,
-            )
+            return DabMask(left, top, sd, data, scale = scale)
         }
 
-        // ── 通常サイズ ──
-        val d = actualD
-        val off: Float = if (rawD % 2 == 0) -1f else -0.5f
-        val fudge = when { r < 4f -> 0.8f; rawD % 2 == 0 && r < 8f -> 0.9f; else -> 1f }
-        val ls = ((LUT_RADIUS - 1f) / r).let { it * it }
+        // ── 通常サイズ + 極小ブラシ: サブピクセル精度マスク ──
+        //
+        // マスク中心を cx/cy の小数部で配置し、各ピクセル中心からの
+        // 正確な距離で LUT を補間参照する。これにより:
+        //  - 細線でブレゼンハム的階段パターンが出ない
+        //  - 1px 未満のブラシでも適切な濃度分配が得られる
+        val maskRad = ceil(r).toInt() + 1
+        val d = maskRad * 2 + 1
+
+        // floor で整数配置 → サブピクセル情報を localCx/Cy に保存
+        val left = floor(cx - d * 0.5f).toInt()
+        val top = floor(cy - d * 0.5f).toInt()
+        val localCx = cx - left
+        val localCy = cy - top
+
+        val ls = if (r > 0.01f) ((LUT_RADIUS - 1f) / r).let { it * it } else LUT_SIZE.toFloat()
+
+        // AA エッジ帯域幅 (ピクセル):
+        //   細線ほどジャギーが目立つため最低 0.7px の AA 幅を確保。
+        //   大きいブラシでは半径の 20% まで (最大 3px)。
+        val aaW = if (safeAA > 0f) safeAA * maxOf(0.7f, minOf(r * 0.2f, 3f)) else 0f
+        // sqrt 計算を必要な帯域のみに限定するための事前計算
+        val rMinusAA = (r - aaW).coerceAtLeast(0f)
+        val rMinusAASq = rMinusAA * rMinusAA
+        val rPlusAA = r + aaW
+        val rPlusAASq = rPlusAA * rPlusAA
+
         val data = IntArray(d * d)
         for (y in 0 until d) {
-            val yy = (y - r + off).let { it * it }
+            val dy = (y + 0.5f) - localCy
+            val dySq = dy * dy
             val ro = y * d
             for (x in 0 until d) {
-                val dist = ((x - r + off).let { it * it } + yy) * fudge * ls
-                data[ro + x] = if (dist.toInt() < LUT_SIZE) lut[dist.toInt()] else 0
+                val dx = (x + 0.5f) - localCx
+                val distSq = dx * dx + dySq
+
+                // LUT 線形補間参照
+                var v = lutLerp(lut, distSq * ls)
+
+                // AA エッジフェード: 円境界の符号付き距離で smoothstep
+                // 完全内側 (distSq <= rMinusAASq): v そのまま
+                // 帯域内: sqrt → smoothstep で滑らかに減衰
+                // 完全外側 (distSq >= rPlusAASq): 0
+                if (aaW > 0f && distSq > rMinusAASq) {
+                    if (distSq >= rPlusAASq) {
+                        v = 0
+                    } else {
+                        val pixDist = sqrt(distSq)
+                        val signedDist = r - pixDist  // +内側, -外側
+                        val t = ((signedDist + aaW) / (2f * aaW)).coerceIn(0f, 1f)
+                        val coverage = t * t * (3f - 2f * t)  // smoothstep
+                        v = (v * coverage).toInt().coerceIn(0, 255)
+                    }
+                }
+
+                data[ro + x] = v
             }
         }
-        return DabMask((cx - d / 2f).toInt(), (cy - d / 2f).toInt(), d, data)
+        return DabMask(left, top, d, data)
     }
 }

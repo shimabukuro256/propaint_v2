@@ -39,6 +39,11 @@ class PaintChannel {
     return _method.invokeMethod('setBrushHardness', {'value': value});
   }
 
+  Future<void> setBrushAntiAliasing(double value) {
+    assert(value >= 0.0 && value <= 1.0, 'antiAliasing must be in 0..1');
+    return _method.invokeMethod('setBrushAntiAliasing', {'value': value});
+  }
+
   Future<void> setBrushDensity(double value) {
     assert(value >= 0.0 && value <= 1.0, 'density must be in 0..1');
     return _method.invokeMethod('setBrushDensity', {'value': value});

@@ -339,6 +339,11 @@ class _MenuPanel extends StatelessWidget {
             onTap: () { channel.requestImport('image'); onClose(); },
           ),
           _MenuItem(
+            icon: Icons.layers_rounded,
+            label: 'PSD を読み込み',
+            onTap: () { channel.requestImport('psd'); onClose(); },
+          ),
+          _MenuItem(
             icon: Icons.file_open_rounded,
             label: 'プロジェクト読み込み',
             onTap: () { channel.requestImport('project'); onClose(); },

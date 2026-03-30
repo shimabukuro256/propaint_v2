@@ -214,7 +214,9 @@ class BrushEngine(
         } else brush.spacing
 
         val spRad = minOf(nomRad, sqrt(nomRad * 30f))
-        val baseStepDist = maxOf(1f, spRad * 2f * autoSpacing)
+        // 細線 (半径 ≤ 4px) ではサブピクセル間隔を許可しジャギーを抑制
+        val minStep = if (nomRad <= 4f) 0.25f else 1f
+        val baseStepDist = maxOf(minStep, spRad * 2f * autoSpacing)
         val effSpacing = (spRad / nomRad * autoSpacing).coerceAtLeast(0.001f)
         // 筆圧でサイズが縮小した際に間隔を適応的に縮める
         // nomRad が大きい時に低筆圧で隙間が空く問題を解消
@@ -286,7 +288,7 @@ class BrushEngine(
                     val ratio = (pRad / nomRad).coerceIn(0.05f, 1f)
                     // ratio が小さいほど間隔を縮める (sqrt で緩やかに遷移)
                     val adaptFactor = sqrt(ratio)
-                    stepDist = maxOf(1f, baseStepDist * adaptFactor)
+                    stepDist = maxOf(minStep, baseStepDist * adaptFactor)
                 }
 
                 // 筆圧→不透明度
@@ -367,7 +369,7 @@ class BrushEngine(
                 val filterRadius = maxOf(1, (nomRad * brush.filterRadiusScale).toInt())
 
                 // ダブマスク生成 & 進行方向に垂直な縁の濃度低減
-                val dab = DabMaskGenerator.createDab(px, py, finalRad * 2f, brush.hardness)
+                val dab = DabMaskGenerator.createDab(px, py, finalRad * 2f, brush.hardness, brush.antiAliasing)
                 if (dab != null && hasFilter) {
                     applyDirectionalEdgeFade(dab, px, py, finalRad)
                 }
