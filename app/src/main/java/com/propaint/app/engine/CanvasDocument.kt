@@ -30,8 +30,9 @@ class CanvasDocument(val width: Int, val height: Int) {
     init {
         require(width > 0) { "canvas width must be > 0, got $width" }
         require(height > 0) { "canvas height must be > 0, got $height" }
-        require(width.toLong() * height.toLong() <= 16384L * 16384L) {
-            "canvas too large: ${width}x${height}"
+        val maxSize = MemoryConfig.maxCanvasSize.toLong()
+        require(width <= maxSize && height <= maxSize) {
+            "canvas too large: ${width}x${height} (max=${maxSize}x${maxSize} for ${MemoryConfig.tierName} device)"
         }
     }
 
@@ -782,7 +783,7 @@ class CanvasDocument(val width: Int, val height: Int) {
         if (layer != null) {
             // スナップショットを Undo に積む (所有権移転)
             undoStack.add(UndoEntry.TileDelta(layer.id, snaps))
-            if (undoStack.size > 50) {
+            if (undoStack.size > MemoryConfig.maxUndoEntries) {
                 releaseUndoEntry(undoStack.removeAt(0))
             }
             PaintDebug.d(PaintDebug.Layer) { "[commitFilterPreview] layerId=${layer.id}" }
@@ -883,7 +884,7 @@ class CanvasDocument(val width: Int, val height: Int) {
             }
         }
         undoStack.add(UndoEntry.TileDelta(layer.id, snaps))
-        if (undoStack.size > 50) {
+        if (undoStack.size > MemoryConfig.maxUndoEntries) {
             // 古いエントリの参照を解放
             val removed = undoStack.removeAt(0)
             releaseUndoEntry(removed)
@@ -896,7 +897,7 @@ class CanvasDocument(val width: Int, val height: Int) {
             _layers.map { LayerSnapshot(it.id, it.name, it.content.snapshot(), it.opacity, it.blendMode, it.isVisible, it.isClipToBelow) },
             activeLayerId,
         ))
-        if (undoStack.size > 50) undoStack.removeAt(0)
+        if (undoStack.size > MemoryConfig.maxUndoEntries) undoStack.removeAt(0)
     }
 
     fun undo(): Boolean = lock.withLock {

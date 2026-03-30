@@ -1,6 +1,7 @@
 package com.propaint.app.flutter
 
 import androidx.compose.ui.graphics.Color
+import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.engine.PaintDebug
 import com.propaint.app.viewmodel.BrushType
 import com.propaint.app.viewmodel.PaintViewModel
@@ -287,6 +288,18 @@ class PaintMethodChannelHandler(
                 result.success(null)
             }
 
+            // ── ブラシ設定のエクスポート/インポート/リセット ──
+            "exportBrushSettings" -> result.success(viewModel.exportBrushSettings())
+            "importBrushSettings" -> {
+                val json = call.argument<String>("json")
+                    ?: return result.error("INVALID_ARG", "json is required", null)
+                result.success(viewModel.importBrushSettings(json))
+            }
+            "resetBrushToDefaults" -> {
+                viewModel.resetBrushToDefaults()
+                result.success(null)
+            }
+
             // ── 状態取得（一括） ──
             "getState" -> result.success(buildStateMap())
 
@@ -386,6 +399,14 @@ class PaintMethodChannelHandler(
             "isDrawing" to viewModel.isDrawing.value,
             "layers" to serializeLayers(viewModel.layers.value),
             "colorHistory" to viewModel.colorHistory.value.map { colorToArgbInt(it) },
+            // デバイスメモリ情報
+            "deviceRamMb" to MemoryConfig.deviceRamMb,
+            "memoryTier" to MemoryConfig.tierName,
+            "maxCanvasSize" to MemoryConfig.maxCanvasSize,
+            "maxLayers" to MemoryConfig.maxLayers,
+            "maxBrushSize" to MemoryConfig.maxDabDiameter,
+            "maxBlurRadius" to MemoryConfig.maxBlurRadius,
+            "maxUndoEntries" to MemoryConfig.maxUndoEntries,
         )
     }
 

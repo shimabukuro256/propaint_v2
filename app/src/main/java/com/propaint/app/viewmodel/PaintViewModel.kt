@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.propaint.app.engine.*
+import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.gallery.GalleryRepository
 import com.propaint.app.gl.CanvasRenderer
 import kotlinx.coroutines.*
@@ -52,6 +53,27 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 現在編集中のプロジェクトID (null = ギャラリーから未オープン) */
     var currentProjectId: String? = null; private set
+
+    // ── 自動保存 (60秒間隔) ────────────────────────────────────────
+    private var autoSaveJob: Job? = null
+    /** ストローク完了後に true にし、自動保存で false に戻す。未変更時は保存をスキップ */
+    private var hasUnsavedChanges = false
+
+    private fun startAutoSave() {
+        autoSaveJob?.cancel()
+        autoSaveJob = viewModelScope.launch {
+            while (isActive) {
+                delay(MemoryConfig.autoSaveIntervalMs)
+                if (hasUnsavedChanges && !_isDrawing.value) {
+                    withContext(Dispatchers.IO) { saveCurrentProject() }
+                    hasUnsavedChanges = false
+                    PaintDebug.d(PaintDebug.Perf) { "[AutoSave] saved project=${currentProjectId}" }
+                }
+            }
+        }
+    }
+
+    private fun stopAutoSave() { autoSaveJob?.cancel(); autoSaveJob = null }
 
     // ── UI State ────────────────────────────────────────────────────
 
@@ -237,8 +259,36 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 現在のブラシ種別の設定を SharedPreferences に永続化 */
+    /** 現在のブラシ種別の設定を SharedPreferences に永続化 (300ms debounce) */
+    private var persistJob: Job? = null
     private fun persistCurrentBrush() {
+        persistJob?.cancel()
+        persistJob = viewModelScope.launch {
+            delay(300L) // スライダードラッグ中の連続書き込みを回避
+            val type = _brushType.value
+            val prefix = "brush_${type.name}_"
+            prefs.edit()
+                .putString("current_brush_type", type.name)
+                .putFloat("${prefix}size", _brushSize.value)
+                .putFloat("${prefix}opacity", _brushOpacity.value)
+                .putFloat("${prefix}hardness", _brushHardness.value)
+                .putFloat("${prefix}density", _brushDensity.value)
+                .putFloat("${prefix}spacing", _brushSpacing.value)
+                .putFloat("${prefix}stabilizer", _brushStabilizer.value)
+                .putFloat("${prefix}colorStretch", _colorStretch.value)
+                .putFloat("${prefix}waterContent", _waterContent.value)
+                .putFloat("${prefix}blurStrength", _blurStrength.value)
+                .putFloat("${prefix}blurPressureThreshold", _blurPressureThreshold.value)
+                .putBoolean("${prefix}pressureSize", _pressureSizeEnabled.value)
+                .putBoolean("${prefix}pressureOpacity", _pressureOpacityEnabled.value)
+                .putBoolean("${prefix}pressureDensity", _pressureDensityEnabled.value)
+                .apply()
+        }
+    }
+
+    /** ブラシ切替時など、即座に永続化が必要な場合 */
+    private fun persistCurrentBrushImmediate() {
+        persistJob?.cancel()
         val type = _brushType.value
         val prefix = "brush_${type.name}_"
         prefs.edit()
@@ -264,6 +314,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun initCanvas(width: Int, height: Int) {
         val doc = CanvasDocument(width, height)
         _document = doc; renderer.document = doc; updateLayerState()
+        startAutoSave()
     }
 
     /** ギャラリーから新規プロジェクトを作成して開く */
@@ -275,6 +326,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _document = doc; renderer.document = doc; currentProjectId = id
             updateLayerState(); updateUndoState()
             resetView()
+            hasUnsavedChanges = false; startAutoSave()
         }
     }
 
@@ -286,6 +338,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _document = doc; renderer.document = doc; currentProjectId = id
             updateLayerState(); updateUndoState()
             resetView()
+            hasUnsavedChanges = false; startAutoSave()
         }
     }
 
@@ -298,9 +351,11 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     /** ギャラリーに戻る前に保存してドキュメントをクリア */
     fun closeProject() {
+        stopAutoSave()
         saveCurrentProject()
         _document = null; renderer.document = null; currentProjectId = null
         _layers.value = emptyList()
+        hasUnsavedChanges = false
     }
 
     // ── ブラシ操作 ──────────────────────────────────────────────────
@@ -338,7 +393,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _brushDensity.value = 1f
             _pressureDensityEnabled.value = false
         }
-        persistCurrentBrush()
+        persistCurrentBrushImmediate()
     }
 
     private fun applyDefaults(type: BrushType) {
@@ -458,6 +513,119 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     fun activateEyedropper() { _toolMode.value = ToolMode.Eyedropper }
     fun deactivateEyedropper() { _toolMode.value = ToolMode.Draw }
+
+    // ── ブラシ設定のエクスポート/インポート (JSON 一括) ──────────────
+
+    /** 全ブラシ設定を JSON 文字列としてエクスポート */
+    fun exportBrushSettings(): String {
+        // 現在のブラシ状態をマップに反映
+        brushStateMap[_brushType.value] = BrushState(
+            _brushSize.value, _brushOpacity.value, _brushHardness.value,
+            _brushDensity.value, _brushSpacing.value, _brushStabilizer.value,
+            _colorStretch.value, _waterContent.value, _blurStrength.value,
+            _blurPressureThreshold.value,
+            _pressureSizeEnabled.value, _pressureOpacityEnabled.value,
+            _pressureDensityEnabled.value,
+        )
+        val sb = StringBuilder()
+        sb.append("{")
+        val entries = BrushType.entries.mapNotNull { type ->
+            val s = brushStateMap[type] ?: return@mapNotNull null
+            """
+            "${type.name}": {
+                "size": ${s.size}, "opacity": ${s.opacity}, "hardness": ${s.hardness},
+                "density": ${s.density}, "spacing": ${s.spacing}, "stabilizer": ${s.stabilizer},
+                "colorStretch": ${s.colorStretch}, "waterContent": ${s.waterContent},
+                "blurStrength": ${s.blurStrength}, "blurPressureThreshold": ${s.blurPressureThreshold},
+                "pressureSize": ${s.pressureSize}, "pressureOpacity": ${s.pressureOpacity},
+                "pressureDensity": ${s.pressureDensity}
+            }""".trimIndent()
+        }
+        sb.append(entries.joinToString(","))
+        sb.append("}")
+        return sb.toString()
+    }
+
+    /** JSON 文字列からブラシ設定を一括インポート */
+    fun importBrushSettings(json: String): Boolean {
+        return try {
+            val org = org.json.JSONObject(json)
+            for (type in BrushType.entries) {
+                if (!org.has(type.name)) continue
+                val obj = org.getJSONObject(type.name)
+                brushStateMap[type] = BrushState(
+                    size = obj.optDouble("size", 10.0).toFloat(),
+                    opacity = obj.optDouble("opacity", 1.0).toFloat(),
+                    hardness = obj.optDouble("hardness", 0.8).toFloat(),
+                    density = obj.optDouble("density", 0.8).toFloat(),
+                    spacing = obj.optDouble("spacing", 0.1).toFloat(),
+                    stabilizer = obj.optDouble("stabilizer", 0.3).toFloat(),
+                    colorStretch = obj.optDouble("colorStretch", 0.0).toFloat(),
+                    waterContent = obj.optDouble("waterContent", 0.0).toFloat(),
+                    blurStrength = obj.optDouble("blurStrength", 0.5).toFloat(),
+                    blurPressureThreshold = obj.optDouble("blurPressureThreshold", 0.0).toFloat(),
+                    pressureSize = obj.optBoolean("pressureSize", true),
+                    pressureOpacity = obj.optBoolean("pressureOpacity", false),
+                    pressureDensity = obj.optBoolean("pressureDensity", false),
+                )
+            }
+            // 現在のブラシ種別の設定を反映
+            val saved = brushStateMap[_brushType.value]
+            if (saved != null) {
+                _brushSize.value = saved.size; _brushOpacity.value = saved.opacity
+                _brushHardness.value = saved.hardness; _brushDensity.value = saved.density
+                _brushSpacing.value = saved.spacing; _brushStabilizer.value = saved.stabilizer
+                _colorStretch.value = saved.colorStretch; _waterContent.value = saved.waterContent
+                _blurStrength.value = saved.blurStrength; _blurPressureThreshold.value = saved.blurPressureThreshold
+                _pressureSizeEnabled.value = saved.pressureSize
+                _pressureOpacityEnabled.value = saved.pressureOpacity
+                _pressureDensityEnabled.value = saved.pressureDensity
+            }
+            // 全ブラシ種別を永続化
+            for (type in BrushType.entries) {
+                val s = brushStateMap[type] ?: continue
+                val prefix = "brush_${type.name}_"
+                prefs.edit()
+                    .putFloat("${prefix}size", s.size)
+                    .putFloat("${prefix}opacity", s.opacity)
+                    .putFloat("${prefix}hardness", s.hardness)
+                    .putFloat("${prefix}density", s.density)
+                    .putFloat("${prefix}spacing", s.spacing)
+                    .putFloat("${prefix}stabilizer", s.stabilizer)
+                    .putFloat("${prefix}colorStretch", s.colorStretch)
+                    .putFloat("${prefix}waterContent", s.waterContent)
+                    .putFloat("${prefix}blurStrength", s.blurStrength)
+                    .putFloat("${prefix}blurPressureThreshold", s.blurPressureThreshold)
+                    .putBoolean("${prefix}pressureSize", s.pressureSize)
+                    .putBoolean("${prefix}pressureOpacity", s.pressureOpacity)
+                    .putBoolean("${prefix}pressureDensity", s.pressureDensity)
+                    .apply()
+            }
+            true
+        } catch (e: Exception) {
+            PaintDebug.d(PaintDebug.Brush) { "[importBrushSettings] failed: ${e.message}" }
+            false
+        }
+    }
+
+    /** 全ブラシ設定をデフォルトに戻す */
+    fun resetBrushToDefaults() {
+        brushStateMap.clear()
+        applyDefaults(_brushType.value)
+        // SharedPreferences から全ブラシ設定を削除
+        val editor = prefs.edit()
+        for (type in BrushType.entries) {
+            val prefix = "brush_${type.name}_"
+            editor.remove("${prefix}size").remove("${prefix}opacity")
+                .remove("${prefix}hardness").remove("${prefix}density")
+                .remove("${prefix}spacing").remove("${prefix}stabilizer")
+                .remove("${prefix}colorStretch").remove("${prefix}waterContent")
+                .remove("${prefix}blurStrength").remove("${prefix}blurPressureThreshold")
+                .remove("${prefix}pressureSize").remove("${prefix}pressureOpacity")
+                .remove("${prefix}pressureDensity")
+        }
+        editor.apply()
+    }
 
     /** BrushConfig を構築 */
     private fun buildBrushConfig(): BrushConfig {
@@ -641,6 +809,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
                     doc.endStroke(brush)
                     _isDrawing.value = false
+                    hasUnsavedChanges = true
                     updateUndoState()
                 }
             }
@@ -815,9 +984,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val insertAt = if (activeIdx >= 0) activeIdx + 1 else doc.layers.size
         val newLayer = doc.addLayer("レイヤー ${doc.nextLayerNameIndex}", insertAt)
         doc.setActiveLayer(newLayer.id)
-        updateLayerState()
+        hasUnsavedChanges = true; updateLayerState()
     }
-    fun removeLayer(id: Int) { _document?.removeLayer(id); updateLayerState() }
+    fun removeLayer(id: Int) { _document?.removeLayer(id); hasUnsavedChanges = true; updateLayerState() }
     fun selectLayer(id: Int) { _document?.setActiveLayer(id); updateLayerState() }
     fun setLayerVisibility(id: Int, v: Boolean) { _document?.setLayerVisibility(id, v); updateLayerState() }
     fun setLayerOpacity(id: Int, v: Float) { _document?.setLayerOpacity(id, v); updateLayerState() }
@@ -838,7 +1007,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         doc.moveLayer(fromIndex, toIndex)
         updateLayerState()
     }
-    fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; updateLayerState() }
+    fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; hasUnsavedChanges = true; updateLayerState() }
     fun duplicateLayer(id: Int) { _document?.duplicateLayer(id); updateLayerState() }
     fun mergeDown(id: Int) { _document?.mergeDown(id); updateLayerState() }
     fun batchMergeLayers(ids: List<Int>) { _document?.batchMergeLayers(ids); updateLayerState() }
@@ -895,8 +1064,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Undo/Redo ───────────────────────────────────────────────────
 
-    fun undo() { _document?.undo(); updateUndoState() }
-    fun redo() { _document?.redo(); updateUndoState() }
+    fun undo() { _document?.undo(); hasUnsavedChanges = true; updateUndoState() }
+    fun redo() { _document?.redo(); hasUnsavedChanges = true; updateUndoState() }
 
     // ── View ────────────────────────────────────────────────────────
 

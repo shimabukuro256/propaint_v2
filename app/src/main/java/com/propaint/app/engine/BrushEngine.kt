@@ -49,6 +49,7 @@ class BrushEngine(
     private var stabY = 0f
     private var stabPressure = 0f
     private var stabInitialized = false
+    private var stabPointCount = 0
 
     data class StrokePoint(
         val x: Float, val y: Float,
@@ -63,6 +64,7 @@ class BrushEngine(
         pointBuffer.clear()
         strokeLayerId = layerId
         stabInitialized = false
+        stabPointCount = 0
         prevDabX = Float.NaN; prevDabY = Float.NaN
         PaintDebug.d(PaintDebug.Brush) { "[beginStroke] layerId=$layerId" }
     }
@@ -106,20 +108,55 @@ class BrushEngine(
         // ── 手振れ補正: リアルタイム EMA フィルタ ──
         // stabilizer=0 → alpha=1.0 (バイパス)
         // stabilizer=1 → alpha≈0.05 (強い平滑化)
-        // 座標と筆圧の両方を平滑化する。
+        //
+        // 座標は強く平滑化するが、筆圧は弱めに平滑化する。
+        // これにより高補正時でも筆圧の入りぬき変動が残り、
+        // 太さが一定になる問題を防ぐ。
+        //
+        // さらに、筆圧の急激な低下（抜き）はリアルタイムで検出し、
+        // 槍のような先細り補正を適用する。
         val smoothedPoint = if (brush.stabilizer > 0.001f) {
-            // alpha: 小さいほど強い平滑化 (0.05..1.0)
+            // 座標の平滑化係数: 小さいほど強い平滑化 (0.05..1.0)
             val alpha = (1f - brush.stabilizer * 0.95f).coerceIn(0.05f, 1f)
+            // 筆圧の平滑化係数: 座標より追従を早くして入りぬきを残す
+            // stabilizer=1 → pressureAlpha≈0.25 (座標の5倍追従)
+            val pressureAlpha = (alpha * 5f).coerceIn(0.15f, 1f)
+
             if (!stabInitialized) {
                 stabX = safePoint.x; stabY = safePoint.y
                 stabPressure = safePoint.pressure
+                stabPointCount = 0
                 stabInitialized = true
                 safePoint
             } else {
                 stabX += (safePoint.x - stabX) * alpha
                 stabY += (safePoint.y - stabY) * alpha
-                stabPressure += (safePoint.pressure - stabPressure) * alpha
-                safePoint.copy(x = stabX, y = stabY, pressure = stabPressure)
+                stabPressure += (safePoint.pressure - stabPressure) * pressureAlpha
+                stabPointCount++
+
+                // ── 抜きの先細り補正 (リアルタイム) ──
+                // 筆圧が急激に低下している場合、さらに筆圧を絞って
+                // 槍のような尖った抜きを実現する。
+                // 入りは控えめに補正（最初の数ポイントは自然に任せる）。
+                var finalPressure = stabPressure
+                if (brush.stabilizer > 0.5f) {
+                    val taperStrength = (brush.stabilizer - 0.5f) * 2f // 0..1
+                    // 抜き検出: 生の筆圧が平滑化された筆圧より大幅に低い
+                    val pressureDrop = stabPressure - safePoint.pressure
+                    if (pressureDrop > 0.1f) {
+                        // 抜き: 筆圧の低下を加速 (槍のように尖る)
+                        val exitSharpness = pressureDrop * taperStrength * 1.5f
+                        finalPressure = (stabPressure - exitSharpness).coerceAtLeast(0f)
+                        stabPressure = finalPressure // フィードバックして加速
+                    }
+                    // 入り (最初の5ポイント): 控えめな補正のみ
+                    if (stabPointCount < 5) {
+                        val entryFade = stabPointCount / 5f
+                        finalPressure = safePoint.pressure + (finalPressure - safePoint.pressure) * entryFade
+                    }
+                }
+
+                safePoint.copy(x = stabX, y = stabY, pressure = finalPressure.coerceIn(0f, 1f))
             }
         } else safePoint
 
@@ -164,9 +201,21 @@ class BrushEngine(
         applyExitTaper: Boolean,
     ): Float {
         val nomRad = brush.size / 2f
+
+        // ── サイズ依存の自動間隔調整 ──
+        // ブラシサイズが大きくなるほど間隔を自動的に上げることで
+        // パフォーマンスを維持しつつ視覚品質を保つ。
+        // 小ブラシ (≤50px): spacing そのまま
+        // 中ブラシ (50-200px): 緩やかに増加
+        // 大ブラシ (200-2000px): 強めに増加
+        val autoSpacing = if (nomRad > 25f) {
+            val sizeFactor = (nomRad / 25f).let { sqrt(it) } // √ で緩やかにスケール
+            (brush.spacing * sizeFactor).coerceAtMost(0.5f) // 最大 50% に制限
+        } else brush.spacing
+
         val spRad = minOf(nomRad, sqrt(nomRad * 30f))
-        val baseStepDist = maxOf(1f, spRad * 2f * brush.spacing)
-        val effSpacing = (spRad / nomRad * brush.spacing).coerceAtLeast(0.001f)
+        val baseStepDist = maxOf(1f, spRad * 2f * autoSpacing)
+        val effSpacing = (spRad / nomRad * autoSpacing).coerceAtLeast(0.001f)
         // 筆圧でサイズが縮小した際に間隔を適応的に縮める
         // nomRad が大きい時に低筆圧で隙間が空く問題を解消
         val adaptiveSpacing = brush.pressureSizeEnabled && nomRad > 10f
@@ -350,6 +399,13 @@ class BrushEngine(
             "dab data size mismatch: expected ${dab.diameter * dab.diameter}, got ${dab.data.size}"
         }
         check(opacity in 0..255) { "opacity out of range: $opacity" }
+
+        if (dab.scale < 1f) {
+            // ── スケーリングされた大ブラシ: 実サイズで適用 ──
+            applyScaledDabToSurface(surface, dab, color, opacity, blendMode)
+            return
+        }
+
         val dr = dab.left + dab.diameter; val db = dab.top + dab.diameter
         val tx0 = maxOf(0, surface.pixelToTile(dab.left))
         val ty0 = maxOf(0, surface.pixelToTile(dab.top))
@@ -365,6 +421,82 @@ class BrushEngine(
                 minOf(Tile.SIZE, dr - ox), minOf(Tile.SIZE, db - oy),
                 dab.left - ox, dab.top - oy,
             )
+            dirtyTracker.markDirty(tx, ty)
+        }
+    }
+
+    /**
+     * スケーリングされたダブマスクを実サイズで適用。
+     * マスクの各ピクセルが 1/scale ピクセル分の領域をカバーする。
+     * ニアレストネイバー補間で高速に拡大適用。
+     */
+    private fun applyScaledDabToSurface(
+        surface: TiledSurface, dab: DabMask,
+        color: Int, opacity: Int, blendMode: Int,
+    ) {
+        val invScale = 1f / dab.scale
+        val actualDiameter = (dab.diameter * invScale).toInt()
+        val dr = dab.left + actualDiameter
+        val db = dab.top + actualDiameter
+        val tx0 = maxOf(0, surface.pixelToTile(dab.left))
+        val ty0 = maxOf(0, surface.pixelToTile(dab.top))
+        val tx1 = minOf(surface.tilesX - 1, surface.pixelToTile(dr - 1))
+        val ty1 = minOf(surface.tilesY - 1, surface.pixelToTile(db - 1))
+
+        val ca = PixelOps.alpha(color); val cr = PixelOps.red(color)
+        val cg = PixelOps.green(color); val cb = PixelOps.blue(color)
+        val minDa = if (blendMode == PixelOps.BLEND_ERASE) 1 else maxOf(1,
+            if (cr > 0) (127 + cr) / cr else 0,
+            if (cg > 0) (127 + cg) / cg else 0,
+            if (cb > 0) (127 + cb) / cb else 0,
+        )
+
+        for (ty in ty0..ty1) for (tx in tx0..tx1) {
+            val tile = surface.getOrCreateMutable(tx, ty)
+            val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
+            val clipL = maxOf(0, dab.left - ox); val clipT = maxOf(0, dab.top - oy)
+            val clipR = minOf(Tile.SIZE, dr - ox); val clipB = minOf(Tile.SIZE, db - oy)
+
+            for (py in clipT until clipB) {
+                val tOff = py * Tile.SIZE
+                // マスク上の Y 座標 (ニアレストネイバー)
+                val my = ((py + oy - dab.top) * dab.scale).toInt()
+                    .coerceIn(0, dab.diameter - 1)
+                val mOff = my * dab.diameter
+                for (px in clipL until clipR) {
+                    val mx = ((px + ox - dab.left) * dab.scale).toInt()
+                        .coerceIn(0, dab.diameter - 1)
+                    val mv = dab.data[mOff + mx]; if (mv <= 0) continue
+                    val da = PixelOps.div255(mv * opacity); if (da < minDa) continue
+                    val di = tOff + px; val dst = tile.pixels[di]
+
+                    when (blendMode) {
+                        PixelOps.BLEND_ERASE -> {
+                            tile.pixels[di] = PixelOps.blendErase(dst, PixelOps.div255(da * ca))
+                        }
+                        PixelOps.BLEND_MARKER -> {
+                            val sa = PixelOps.div255(ca * da); val sr = PixelOps.div255(cr * da)
+                            val sg = PixelOps.div255(cg * da); val sb = PixelOps.div255(cb * da)
+                            val inv = 255 - sa
+                            tile.pixels[di] = PixelOps.pack(
+                                maxOf(sa, PixelOps.alpha(dst)),
+                                sr + PixelOps.div255(PixelOps.red(dst) * inv),
+                                sg + PixelOps.div255(PixelOps.green(dst) * inv),
+                                sb + PixelOps.div255(PixelOps.blue(dst) * inv))
+                        }
+                        else -> {
+                            val sa = PixelOps.div255(ca * da); val sr = PixelOps.div255(cr * da)
+                            val sg = PixelOps.div255(cg * da); val sb = PixelOps.div255(cb * da)
+                            val inv = 255 - sa
+                            tile.pixels[di] = PixelOps.pack(
+                                sa + PixelOps.div255(PixelOps.alpha(dst) * inv),
+                                sr + PixelOps.div255(PixelOps.red(dst) * inv),
+                                sg + PixelOps.div255(PixelOps.green(dst) * inv),
+                                sb + PixelOps.div255(PixelOps.blue(dst) * inv))
+                        }
+                    }
+                }
+            }
             dirtyTracker.markDirty(tx, ty)
         }
     }
@@ -390,7 +522,8 @@ class BrushEngine(
         drawTarget: TiledSurface, sampleSource: TiledSurface,
         cx: Int, cy: Int, radius: Int, filterType: Int,
     ) {
-        val safeRadius = radius.coerceIn(1, 2000)
+        // 大ブラシ時のメモリ/CPU 負荷を制限: デバイス RAM に応じた上限
+        val safeRadius = radius.coerceIn(1, MemoryConfig.maxBlurRadius)
         val x0 = maxOf(0, cx - safeRadius)
         val y0 = maxOf(0, cy - safeRadius)
         val x1 = minOf(drawTarget.width - 1, cx + safeRadius)
@@ -694,7 +827,8 @@ class BrushEngine(
         // 垂直方向の単位ベクトル (-dy, dx) / len
         val perpX = -ddy / dirLen; val perpY = ddx / dirLen
         val d = dab.diameter
-        val r = radius
+        // スケーリングされたマスクではマスク座標系での半径を使う
+        val r = radius * dab.scale
         val fadeStart = 0.80f  // 半径の 80% から減衰開始
         val fadeStrength = 0.05f // 最縁で最大 5% 減衰
         for (y in 0 until d) {

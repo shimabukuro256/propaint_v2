@@ -150,6 +150,24 @@ class PaintChannel {
   Future<void> moveLayerDown(int id) =>
       _method.invokeMethod('moveLayerDown', {'id': id});
 
+  // ─── ブラシ設定のエクスポート/インポート/リセット ──────
+
+  /// 全ブラシ設定を JSON 文字列としてエクスポート
+  Future<String> exportBrushSettings() async {
+    final result = await _method.invokeMethod<String>('exportBrushSettings');
+    return result ?? '{}';
+  }
+
+  /// JSON 文字列からブラシ設定をインポート
+  Future<bool> importBrushSettings(String json) async {
+    final result = await _method.invokeMethod<bool>('importBrushSettings', {'json': json});
+    return result ?? false;
+  }
+
+  /// 全ブラシ設定をデフォルトに戻す
+  Future<void> resetBrushToDefaults() =>
+      _method.invokeMethod('resetBrushToDefaults');
+
   // ─── ツールモード ─────────────────────────────────────
 
   Future<void> activateEyedropper() =>
@@ -174,4 +192,40 @@ class PaintChannel {
   Stream<Map<String, dynamic>> get stateStream => _state
       .receiveBroadcastStream()
       .map((e) => Map<String, dynamic>.from(e as Map));
+
+  // ─── デバイスメモリ情報ヘルパー ──────────────────────────
+
+  /// デバイスメモリ情報を取得（state map から抽出）
+  static MemoryInfo parseMemoryInfo(Map<String, dynamic> state) {
+    return MemoryInfo(
+      deviceRamMb: state['deviceRamMb'] as int? ?? 0,
+      memoryTier: state['memoryTier'] as String? ?? 'unknown',
+      maxCanvasSize: state['maxCanvasSize'] as int? ?? 4096,
+      maxLayers: state['maxLayers'] as int? ?? 16,
+      maxBrushSize: state['maxBrushSize'] as int? ?? 512,
+      maxBlurRadius: state['maxBlurRadius'] as int? ?? 512,
+      maxUndoEntries: state['maxUndoEntries'] as int? ?? 50,
+    );
+  }
+}
+
+/// デバイスの RAM に基づくメモリ制限情報
+class MemoryInfo {
+  final int deviceRamMb;
+  final String memoryTier;
+  final int maxCanvasSize;
+  final int maxLayers;
+  final int maxBrushSize;
+  final int maxBlurRadius;
+  final int maxUndoEntries;
+
+  const MemoryInfo({
+    required this.deviceRamMb,
+    required this.memoryTier,
+    required this.maxCanvasSize,
+    required this.maxLayers,
+    required this.maxBrushSize,
+    required this.maxBlurRadius,
+    required this.maxUndoEntries,
+  });
 }

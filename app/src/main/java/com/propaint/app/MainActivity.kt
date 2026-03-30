@@ -14,6 +14,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.flutter.PaintFlutterActivity
 import com.propaint.app.gallery.GalleryScreen
 import com.propaint.app.ui.screens.PaintScreen
@@ -27,6 +28,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // デバイス RAM に基づいてメモリ設定を初期化
+        MemoryConfig.init(this)
 
         // イマーシブモード
         WindowCompat.setDecorFitsSystemWindows(window, false)

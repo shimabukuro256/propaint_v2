@@ -12,6 +12,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.engine.PaintDebug
 import com.propaint.app.viewmodel.PaintViewModel
 import io.flutter.embedding.android.FlutterActivity
@@ -33,6 +34,9 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // デバイス RAM に基づいてメモリ設定を初期化
+        MemoryConfig.init(this)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -184,6 +188,12 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
 
     override fun onPause() {
         super.onPause()
+        viewModel.saveCurrentProject()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // onPause 後にクラッシュ/強制終了されるケースに備えて二重に保存
         viewModel.saveCurrentProject()
     }
 

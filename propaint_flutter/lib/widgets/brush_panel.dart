@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../models/paint_state.dart';
@@ -132,6 +134,11 @@ class BrushPanel extends StatelessWidget {
 
             // 筆圧設定
             _PressureSection(state: state, channel: channel),
+
+            const Divider(color: C.border, height: 16, indent: 12, endIndent: 12),
+
+            // ブラシ設定管理ボタン
+            _BrushManagementSection(channel: channel),
           ],
         ),
       ),
@@ -242,6 +249,139 @@ class _PressureSection extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _BrushManagementSection extends StatelessWidget {
+  final PaintChannel channel;
+
+  const _BrushManagementSection({required this.channel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Row(
+        children: [
+          _SmallButton(
+            icon: Icons.restart_alt_rounded,
+            label: 'リセット',
+            onTap: () => _confirmReset(context),
+          ),
+          const SizedBox(width: 8),
+          _SmallButton(
+            icon: Icons.file_upload_outlined,
+            label: 'エクスポート',
+            onTap: () => _exportSettings(context),
+          ),
+          const SizedBox(width: 8),
+          _SmallButton(
+            icon: Icons.file_download_outlined,
+            label: 'インポート',
+            onTap: () => _importSettings(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _confirmReset(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: C.card,
+        title: const Text('ブラシ設定をリセット', style: TextStyle(color: C.textPrimary, fontSize: 16)),
+        content: const Text('全ブラシの設定をデフォルトに戻しますか？', style: TextStyle(color: C.textSecondary, fontSize: 14)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('キャンセル')),
+          TextButton(
+            onPressed: () { Navigator.pop(ctx); channel.resetBrushToDefaults(); },
+            child: const Text('リセット', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _exportSettings(BuildContext context) async {
+    try {
+      final json = await channel.exportBrushSettings();
+      // アプリの外部ストレージに保存
+      final dir = Directory('/storage/emulated/0/Download');
+      final file = File('${dir.path}/propaint_brush_settings.json');
+      await file.writeAsString(json);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ブラシ設定をダウンロードフォルダに保存しました')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('エクスポート失敗: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _importSettings(BuildContext context) async {
+    try {
+      final file = File('/storage/emulated/0/Download/propaint_brush_settings.json');
+      if (!await file.exists()) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ダウンロードフォルダに propaint_brush_settings.json が見つかりません')),
+          );
+        }
+        return;
+      }
+      final json = await file.readAsString();
+      final ok = await channel.importBrushSettings(json);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(ok ? 'ブラシ設定をインポートしました' : 'インポート失敗: 無効なデータ')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('インポート失敗: $e')),
+        );
+      }
+    }
+  }
+}
+
+class _SmallButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _SmallButton({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            color: C.surface,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: C.border, width: 1),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: C.textSecondary),
+              const SizedBox(height: 2),
+              Text(label, style: const TextStyle(fontSize: 9, color: C.textSecondary)),
+            ],
+          ),
+        ),
       ),
     );
   }
