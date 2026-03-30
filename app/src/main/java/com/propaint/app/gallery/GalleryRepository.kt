@@ -51,12 +51,12 @@ class GalleryRepository(private val context: Context) {
         return id
     }
 
-    /** プロジェクトを保存 (上書き) + サムネイル更新 */
+    /** プロジェクトを保存 (上書き) + サムネイル更新 + メタデータ解像度同期 */
     fun saveProject(id: String, doc: CanvasDocument) {
         val file = File(projectsDir, "$id.ppaint")
         FileOutputStream(file).use { ProjectFile.save(doc, it) }
         generateThumbnail(id, doc)
-        updateModifiedTime(id)
+        updateMeta(id, doc.width, doc.height)
     }
 
     /** プロジェクトを読み込み */
@@ -79,8 +79,8 @@ class GalleryRepository(private val context: Context) {
         if (!metaFile.exists()) return
         val lines = metaFile.readLines().map { line ->
             val parts = line.split("|")
-            if (parts.size >= 4 && parts[0] == id) {
-                "$id|$newName|${parts[2]}|${parts[3]}|${System.currentTimeMillis()}"
+            if (parts.size >= 6 && parts[0] == id) {
+                "$id|$newName|${parts[2]}|${parts[3]}|${parts[4]}|${System.currentTimeMillis()}"
             } else line
         }
         metaFile.writeText(lines.joinToString("\n"))
@@ -119,14 +119,14 @@ class GalleryRepository(private val context: Context) {
         metaFile.appendText(line + "\n")
     }
 
-    private fun updateModifiedTime(id: String) {
+    /** メタデータの解像度とタイムスタンプを更新 */
+    private fun updateMeta(id: String, width: Int, height: Int) {
         val metaFile = File(projectsDir, "gallery_meta.txt")
         if (!metaFile.exists()) return
         val lines = metaFile.readLines().map { line ->
             val parts = line.split("|")
-            if (parts.isNotEmpty() && parts[0] == id) {
-                val base = parts.dropLast(1).joinToString("|")
-                "$base|${System.currentTimeMillis()}"
+            if (parts.size >= 6 && parts[0] == id) {
+                "${parts[0]}|${parts[1]}|${width}x${height}|$width|$height|${System.currentTimeMillis()}"
             } else line
         }
         metaFile.writeText(lines.joinToString("\n"))
@@ -141,12 +141,23 @@ class GalleryRepository(private val context: Context) {
 
     private fun parseMeta(line: String): GalleryItem? {
         val parts = line.split("|")
-        if (parts.size < 6) return null
+        if (parts.size < 5) return null
         val id = parts[0]
         val name = parts[1]
-        val w = parts[3].toIntOrNull() ?: return null
-        val h = parts[4].toIntOrNull() ?: return null
-        val mod = parts[5].toLongOrNull() ?: 0L
+        // 旧形式 (5フィールド) と新形式 (6フィールド) の両方をサポート
+        val w: Int; val h: Int; val mod: Long
+        if (parts.size >= 6) {
+            w = parts[3].toIntOrNull() ?: return null
+            h = parts[4].toIntOrNull() ?: return null
+            mod = parts[5].toLongOrNull() ?: 0L
+        } else {
+            // 旧形式: id|name|WxH|width|timestamp (heightフィールド欠落)
+            // WxH パースにフォールバック
+            val res = parts[2].split("x")
+            w = res.getOrNull(0)?.toIntOrNull() ?: return null
+            h = res.getOrNull(1)?.toIntOrNull() ?: return null
+            mod = parts.getOrNull(4)?.toLongOrNull() ?: parts.getOrNull(3)?.toLongOrNull() ?: 0L
+        }
         val file = File(projectsDir, "$id.ppaint")
         if (!file.exists()) return null
         return GalleryItem(id, name, w, h, mod, file.absolutePath,

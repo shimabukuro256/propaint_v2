@@ -165,8 +165,11 @@ class BrushEngine(
     ): Float {
         val nomRad = brush.size / 2f
         val spRad = minOf(nomRad, sqrt(nomRad * 30f))
-        val stepDist = maxOf(1f, spRad * 2f * brush.spacing)
+        val baseStepDist = maxOf(1f, spRad * 2f * brush.spacing)
         val effSpacing = (spRad / nomRad * brush.spacing).coerceAtLeast(0.001f)
+        // 筆圧でサイズが縮小した際に間隔を適応的に縮める
+        // nomRad が大きい時に低筆圧で隙間が空く問題を解消
+        val adaptiveSpacing = brush.pressureSizeEnabled && nomRad > 10f
 
         // Indirect モード (sublayer あり) かつ opacity=1.0 の場合:
         // spacing 補正を省略し rawDensity をそのまま使う。
@@ -196,6 +199,7 @@ class BrushEngine(
         }
 
         var dist = initialDist
+        var stepDist = baseStepDist
 
         for (i in fromSegIdx until pts.size - 1) {
             val p0 = pts[i]; val p1 = pts[i + 1]
@@ -226,6 +230,15 @@ class BrushEngine(
                         maxOf(rad, threshRad)
                     } else rad
                 } else nomRad
+
+                // 適応的間隔: 筆圧で縮小した実半径に基づいてステップ距離を再計算
+                // 大きいブラシで低筆圧時の隙間を防ぐ
+                if (adaptiveSpacing) {
+                    val ratio = (pRad / nomRad).coerceIn(0.05f, 1f)
+                    // ratio が小さいほど間隔を縮める (sqrt で緩やかに遷移)
+                    val adaptFactor = sqrt(ratio)
+                    stepDist = maxOf(1f, baseStepDist * adaptFactor)
+                }
 
                 // 筆圧→不透明度
                 val pAlpha = if (brush.pressureOpacityEnabled)
@@ -288,8 +301,13 @@ class BrushEngine(
                 // ダブ不透明度
                 val rawDensity = pDensity * pAlpha * taper
                 if (rawDensity < 1f / 512f) { dist += stepDist; continue } // 実質的に不可視
+                // 適応間隔時は実効 spacing も再計算して濃度補正を維持
+                val curEffSpacing = if (adaptiveSpacing) {
+                    val ratio = (pRad / nomRad).coerceIn(0.05f, 1f)
+                    (sqrt(ratio) * effSpacing).coerceAtLeast(0.001f)
+                } else effSpacing
                 val dabDensity = if (skipCompensation) rawDensity
-                    else spacingCompensate(rawDensity, effSpacing)
+                    else spacingCompensate(rawDensity, curEffSpacing)
                 // Direct モードの Marker は sublayer 合成がないため、
                 // brush.opacity をダブ不透明度に直接乗算する。
                 val directOpacity = if (brush.isMarker) brush.opacity else 1f

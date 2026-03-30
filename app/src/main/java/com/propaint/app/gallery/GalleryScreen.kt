@@ -27,10 +27,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -49,7 +52,17 @@ fun GalleryScreen(
     // サムネイルキャッシュ
     val thumbnails = remember { mutableStateMapOf<String, Bitmap?>() }
 
-    fun refresh() { items = repo.listProjects() }
+    fun refresh() { items = repo.listProjects(); thumbnails.clear() }
+
+    // Activity 復帰時にリフレッシュ (PaintFlutterActivity から戻った際に反映)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF121212))) {
         Column(Modifier.fillMaxSize()) {
@@ -163,6 +176,7 @@ fun GalleryScreen(
     if (showNewDialog) {
         NewCanvasDialog(
             onDismiss = { showNewDialog = false },
+            projectCount = items.size,
             onCreate = { name, w, h ->
                 showNewDialog = false
                 onNewCanvas(name, w, h)

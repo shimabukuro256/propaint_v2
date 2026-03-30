@@ -153,6 +153,38 @@ class CanvasDocument(val width: Int, val height: Int) {
         dirtyTracker.markFullRebuild(); true
     }
 
+    /**
+     * 複数レイヤーを一括結合する。undo は1回分のみ記録。
+     * @param ids 結合対象レイヤーIDのリスト（ドキュメント内の順序は問わない）
+     * @return 結合先レイヤーの ID、失敗時は -1
+     */
+    fun batchMergeLayers(ids: List<Int>): Int = lock.withLock {
+        if (ids.size < 2) return -1
+        forceEndStrokeIfNeeded()
+        // ドキュメント順にソート（下から上）
+        val sortedIndices = ids.mapNotNull { id -> _layers.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
+            .distinct().sorted()
+        if (sortedIndices.size < 2) return -1
+        pushUndoStructural()
+        // 最も下のレイヤーに順次結合
+        val baseIdx = sortedIndices[0]
+        val base = _layers[baseIdx]
+        // 上のレイヤーから順に結合（インデックスがずれないよう逆順で除去）
+        val toRemove = mutableListOf<Int>()
+        for (i in 1 until sortedIndices.size) {
+            val srcLayer = _layers.getOrNull(sortedIndices[i]) ?: continue
+            compositeTwoLayers(base.content, srcLayer.content, srcLayer.opacity, srcLayer.blendMode)
+            toRemove.add(sortedIndices[i])
+        }
+        // 上から除去（インデックスずれ防止のため降順）
+        for (removeIdx in toRemove.sortedDescending()) {
+            val removed = _layers.removeAt(removeIdx)
+            if (activeLayerId == removed.id) activeLayerId = base.id
+        }
+        dirtyTracker.markFullRebuild()
+        base.id
+    }
+
     fun clearLayer(id: Int) = lock.withLock {
         forceEndStrokeIfNeeded()
         val layer = _layers.find { it.id == id } ?: return

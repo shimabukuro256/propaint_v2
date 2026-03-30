@@ -43,6 +43,13 @@ private val presets = listOf(
     CanvasPreset("A5 横 (2480x1748)", 2480, 1748, "印刷 300dpi"),
     CanvasPreset("B5 縦 (2150x3035)", 2150, 3035, "印刷 300dpi"),
     CanvasPreset("はがき (1181x1748)", 1181, 1748, "印刷 300dpi"),
+    // 印刷 (350dpi)
+    CanvasPreset("A4 縦 (2894x4093)", 2894, 4093, "印刷 350dpi"),
+    CanvasPreset("A4 横 (4093x2894)", 4093, 2894, "印刷 350dpi"),
+    CanvasPreset("A5 縦 (2039x2894)", 2039, 2894, "印刷 350dpi"),
+    CanvasPreset("A5 横 (2894x2039)", 2894, 2039, "印刷 350dpi"),
+    CanvasPreset("B5 縦 (2508x3541)", 2508, 3541, "印刷 350dpi"),
+    CanvasPreset("はがき (1378x2039)", 1378, 2039, "印刷 350dpi"),
     // SNS
     CanvasPreset("Twitter ヘッダー (1500x500)", 1500, 500, "SNS"),
     CanvasPreset("Instagram (1080x1080)", 1080, 1080, "SNS"),
@@ -53,7 +60,9 @@ private val presets = listOf(
 fun NewCanvasDialog(
     onDismiss: () -> Unit,
     onCreate: (name: String, width: Int, height: Int) -> Unit,
+    projectCount: Int = 0,
 ) {
+    val defaultName = "無題 ${projectCount + 1}"
     var name by remember { mutableStateOf("") }
     var customWidth by remember { mutableStateOf("2048") }
     var customHeight by remember { mutableStateOf("2048") }
@@ -76,7 +85,7 @@ fun NewCanvasDialog(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("作品名") },
-                    placeholder = { Text("無題") },
+                    placeholder = { Text(defaultName) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -190,7 +199,7 @@ fun NewCanvasDialog(
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = {
-                            val finalName = name.ifBlank { "無題" }
+                            val finalName = name.ifBlank { defaultName }
                             if (showCustom) {
                                 val w = customWidth.toIntOrNull()?.coerceIn(64, 16384) ?: 2048
                                 val h = customHeight.toIntOrNull()?.coerceIn(64, 16384) ?: 2048

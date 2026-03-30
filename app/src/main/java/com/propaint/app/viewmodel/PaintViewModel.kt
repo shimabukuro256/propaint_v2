@@ -4,12 +4,16 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.propaint.app.engine.*
 import com.propaint.app.gallery.GalleryRepository
 import com.propaint.app.gl.CanvasRenderer
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,6 +25,7 @@ data class UiLayer(
     val id: Int, val name: String, val opacity: Float, val blendMode: Int,
     val isVisible: Boolean, val isLocked: Boolean,
     val isClipToBelow: Boolean, val isActive: Boolean,
+    val isAlphaLocked: Boolean = false,
 )
 
 enum class BrushType(
@@ -98,6 +103,13 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             Color.Green, Color.Yellow, Color(0xFFFF6600), Color(0xFF9900FF),
             Color(0xFF00CCCC), Color(0xFFFF69B4), Color(0xFF8B4513), Color(0xFF808080),
         )
+
+        // ジェスチャ定数
+        private const val TAP_SLOP = 20f
+        private const val TAP_TIMEOUT_MS = 300L
+        private const val PALM_SIZE_THRESHOLD = 0.2f
+        private const val INERTIA_FRICTION = 0.8f
+        private const val INERTIA_MIN_VELOCITY = 0.5f
     }
 
     val colorHistory = MutableStateFlow(loadColorHistory())
@@ -136,6 +148,31 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var gestureStartPanX = 0f; private var gestureStartPanY = 0f
     private var gestureStartMidX = 0f; private var gestureStartMidY = 0f
     private var isMultiTouch = false
+
+    // マルチタップ検出 (2本指=Undo, 3本指=Redo)
+    private var multiTouchDownTime = 0L
+    private var multiTouchMaxFingers = 0
+    private var multiTouchTotalMovement = 0f
+    private var gestureCommittedToPinch = false
+    private var multiTouchLastMidX = 0f
+    private var multiTouchLastMidY = 0f
+
+    // パームリジェクション
+    private var stylusIsDown = false
+
+    // 慣性アニメーション
+    private var velocityTracker: VelocityTracker? = null
+    private var inertiaJob: Job? = null
+
+    /** ジェスチャ通知コールバック (undo/redo 等の通知を Flutter に送るため) */
+    var onGestureEvent: ((String) -> Unit)? = null
+
+    /** エクスポート要求コールバック (Activity の ResultLauncher を起動するため) */
+    var onExportRequest: ((String) -> Unit)? = null
+    /** インポート要求コールバック */
+    var onImportRequest: ((String) -> Unit)? = null
+    /** ギャラリーに戻る要求コールバック */
+    var onReturnToGallery: (() -> Unit)? = null
 
     // ブラシ設定マップ (種別ごとに全パラメータ保持)
     data class BrushState(
@@ -526,6 +563,25 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun onTouchEvent(event: MotionEvent): Boolean {
         val doc = _document ?: return false
 
+        // 慣性アニメーション中に新しいタッチが来たらキャンセル
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            inertiaJob?.cancel()
+        }
+
+        // パームリジェクション: スタイラス使用中の大きいタッチを拒否
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            stylusIsDown = event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS ||
+                event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
+        }
+        if (stylusIsDown && event.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER) {
+            PaintDebug.d(PaintDebug.Input) { "[PalmReject] finger during stylus, rejected" }
+            return false
+        }
+        if (event.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER && event.getSize(0) > PALM_SIZE_THRESHOLD) {
+            PaintDebug.d(PaintDebug.Input) { "[PalmReject] size=${event.getSize(0)} rejected" }
+            return false
+        }
+
         if (event.pointerCount >= 2) { hideCursor(); handleMultiTouch(event); return true }
 
         if (isMultiTouch && event.actionMasked == MotionEvent.ACTION_MOVE) return true
@@ -534,19 +590,35 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         // スタイラス消しゴム端の自動検出
         val isEraserTip = event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
 
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                isMultiTouch = false
-                updateCursor(event.x, event.y, event.pressure)
-                if (_toolMode.value == ToolMode.Eyedropper) {
+        // スポイトモード: タッチしている間連続サンプリング
+        if (_toolMode.value == ToolMode.Eyedropper) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                    updateCursor(event.x, event.y, event.pressure)
+                    val (dx, dy) = screenToDoc(event.x, event.y)
+                    val sampled = doc.eyedropperAt(dx.toInt(), dy.toInt())
+                    val up = PixelOps.unpremultiply(sampled)
+                    // commitColorToHistory は UP 時にのみ実行 (MOVE 中はプレビュー)
+                    val c = Color(PixelOps.red(up) / 255f, PixelOps.green(up) / 255f, PixelOps.blue(up) / 255f)
+                    _currentColor.value = c
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    // 最終位置でサンプリングして履歴にコミット
                     val (dx, dy) = screenToDoc(event.x, event.y)
                     val sampled = doc.eyedropperAt(dx.toInt(), dy.toInt())
                     val up = PixelOps.unpremultiply(sampled)
                     commitColorToHistory(Color(PixelOps.red(up) / 255f, PixelOps.green(up) / 255f, PixelOps.blue(up) / 255f))
                     _toolMode.value = ToolMode.Draw
                     hideCursor()
-                    return true
                 }
+            }
+            return true
+        }
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                isMultiTouch = false
+                updateCursor(event.x, event.y, event.pressure)
                 var brush = buildBrushConfig()
                 if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
                 doc.beginStroke(brush)
@@ -563,6 +635,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 hideCursor()
+                if (event.actionMasked == MotionEvent.ACTION_UP) stylusIsDown = false
                 if (_isDrawing.value) {
                     var brush = buildBrushConfig()
                     if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
@@ -596,9 +669,17 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             (dx * sinR + dy * cosR) / fs + doc.height / 2f)
     }
 
+    // マルチタッチ開始時に不要ストロークが始まっていた場合の追加 undo 回数
+    private var multiTouchAccidentalStroke = false
+    // タップアクション発火済みフラグ（二重発火防止）
+    private var tapActionFired = false
+
     private fun handleMultiTouch(event: MotionEvent) {
         if (!isMultiTouch && _isDrawing.value) {
+            // 最初の指で始まった不要ストロークを終了し、即座に undo で取り消す
             _document?.endStroke(buildBrushConfig()); _isDrawing.value = false
+            _document?.undo(); updateUndoState()
+            multiTouchAccidentalStroke = true
         }
         val x0 = event.getX(0); val y0 = event.getY(0)
         val x1 = event.getX(1); val y1 = event.getY(1)
@@ -611,15 +692,116 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 gestureStartAngle = angle; gestureStartRotation = _rotation
                 gestureStartPanX = _panX; gestureStartPanY = _panY
                 gestureStartMidX = midX; gestureStartMidY = midY
+
+                // タップ検出: 指が増えたらタイマーとムーブメントをリセット
+                multiTouchDownTime = SystemClock.uptimeMillis()
+                multiTouchMaxFingers = maxOf(multiTouchMaxFingers, event.pointerCount)
+                multiTouchTotalMovement = 0f
+                gestureCommittedToPinch = false
+                tapActionFired = false
+                multiTouchLastMidX = midX; multiTouchLastMidY = midY
+
+                // VelocityTracker 初期化
+                velocityTracker?.recycle()
+                velocityTracker = VelocityTracker.obtain()
+                velocityTracker?.addMovement(event)
             }
             MotionEvent.ACTION_MOVE -> {
-                if (isMultiTouch && gestureStartDist > 10f) {
+                velocityTracker?.addMovement(event)
+                multiTouchMaxFingers = maxOf(multiTouchMaxFingers, event.pointerCount)
+
+                // 移動量を累積してタップ/ピンチを判定
+                val moveDx = midX - multiTouchLastMidX
+                val moveDy = midY - multiTouchLastMidY
+                multiTouchTotalMovement += sqrt(moveDx * moveDx + moveDy * moveDy)
+                multiTouchLastMidX = midX; multiTouchLastMidY = midY
+
+                // 3本指は手の微動が大きいので閾値を緩くする
+                val currentSlop = if (multiTouchMaxFingers >= 3) TAP_SLOP * 2.5f else TAP_SLOP
+                if (!gestureCommittedToPinch && multiTouchTotalMovement > currentSlop) {
+                    gestureCommittedToPinch = true
+                }
+
+                // ピンチ/ズーム/回転/パン (タップと判定されない場合のみ)
+                if (gestureCommittedToPinch && gestureStartDist > 10f) {
                     _zoom = (gestureStartZoom * dist / gestureStartDist).coerceIn(0.1f, 30f)
                     _rotation = gestureStartRotation + (angle - gestureStartAngle)
                     _panX = gestureStartPanX + (midX - gestureStartMidX)
                     _panY = gestureStartPanY + (midY - gestureStartMidY)
                     renderer.pendingTransform.set(floatArrayOf(_zoom, _panX, _panY, _rotation))
                 }
+            }
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
+                val elapsed = SystemClock.uptimeMillis() - multiTouchDownTime
+                // 3本指は配置に時間がかかるので猶予を長く
+                val currentTimeout = if (multiTouchMaxFingers >= 3) TAP_TIMEOUT_MS * 2 else TAP_TIMEOUT_MS
+
+                // タップ判定（二重発火防止）
+                if (!tapActionFired && !gestureCommittedToPinch && elapsed < currentTimeout) {
+                    tapActionFired = true
+                    when (multiTouchMaxFingers) {
+                        2 -> {
+                            PaintDebug.d(PaintDebug.Input) {
+                                "[MultiTap] fingers=2 movement=${multiTouchTotalMovement} elapsed=${elapsed}ms action=undo"
+                            }
+                            undo()
+                            onGestureEvent?.invoke("undo")
+                        }
+                        3 -> {
+                            PaintDebug.d(PaintDebug.Input) {
+                                "[MultiTap] fingers=3 movement=${multiTouchTotalMovement} elapsed=${elapsed}ms action=redo"
+                            }
+                            redo()
+                            onGestureEvent?.invoke("redo")
+                        }
+                    }
+                } else if (gestureCommittedToPinch && !tapActionFired) {
+                    // 慣性開始（ピンチ操作の場合のみ）
+                    startInertia()
+                }
+
+                // リセット (全指が離れた場合)
+                if ((event.pointerCount <= 2 && event.actionMasked == MotionEvent.ACTION_POINTER_UP) ||
+                    event.actionMasked == MotionEvent.ACTION_UP) {
+                    multiTouchMaxFingers = 0
+                    multiTouchAccidentalStroke = false
+                    tapActionFired = false
+                    velocityTracker?.recycle(); velocityTracker = null
+                }
+            }
+        }
+    }
+
+    private fun startInertia() {
+        val vt = velocityTracker ?: return
+        vt.computeCurrentVelocity(1000) // pixels/sec
+        var vx = vt.xVelocity
+        var vy = vt.yVelocity
+
+        // NaN/Infinity 防御
+        if (vx.isNaN() || vx.isInfinite()) vx = 0f
+        if (vy.isNaN() || vy.isInfinite()) vy = 0f
+
+        // 最大速度を制限
+        val maxV = 2000f
+        vx = vx.coerceIn(-maxV, maxV)
+        vy = vy.coerceIn(-maxV, maxV)
+
+        // 速度が小さすぎたら慣性なし
+        if (abs(vx) < 50f && abs(vy) < 50f) return
+
+        PaintDebug.d(PaintDebug.Perf) { "[Inertia] start vx=$vx vy=$vy" }
+
+        inertiaJob?.cancel()
+        inertiaJob = viewModelScope.launch {
+            val dt = 0.016f // ~60fps
+            while (abs(vx) > INERTIA_MIN_VELOCITY || abs(vy) > INERTIA_MIN_VELOCITY) {
+                _panX += vx * dt
+                _panY += vy * dt
+                vx *= INERTIA_FRICTION
+                vy *= INERTIA_FRICTION
+                renderer.pendingTransform.set(floatArrayOf(_zoom, _panX, _panY, _rotation))
+                delay(16L)
             }
         }
     }
@@ -628,7 +810,12 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addLayer() {
         val doc = _document ?: return
-        doc.addLayer("レイヤー ${doc.nextLayerNameIndex}"); updateLayerState()
+        // アクティブレイヤーの1つ上に挿入
+        val activeIdx = doc.layers.indexOfFirst { it.id == doc.activeLayerId }
+        val insertAt = if (activeIdx >= 0) activeIdx + 1 else doc.layers.size
+        val newLayer = doc.addLayer("レイヤー ${doc.nextLayerNameIndex}", insertAt)
+        doc.setActiveLayer(newLayer.id)
+        updateLayerState()
     }
     fun removeLayer(id: Int) { _document?.removeLayer(id); updateLayerState() }
     fun selectLayer(id: Int) { _document?.setActiveLayer(id); updateLayerState() }
@@ -637,9 +824,24 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun setLayerBlendMode(id: Int, m: Int) { _document?.setLayerBlendMode(id, m); updateLayerState() }
     fun setLayerClip(id: Int, clip: Boolean) { _document?.setLayerClipToBelow(id, clip); updateLayerState() }
     fun setLayerLocked(id: Int, locked: Boolean) { _document?.setLayerLocked(id, locked); updateLayerState() }
+    fun setAlphaLocked(id: Int, locked: Boolean) {
+        val doc = _document ?: return
+        val layer = doc.layers.find { it.id == id } ?: return
+        layer.isAlphaLocked = locked
+        updateLayerState()
+    }
+    fun reorderLayer(fromIndex: Int, toIndex: Int) {
+        val doc = _document ?: return
+        require(fromIndex in doc.layers.indices) { "fromIndex out of range: $fromIndex" }
+        require(toIndex in doc.layers.indices) { "toIndex out of range: $toIndex" }
+        if (fromIndex == toIndex) return
+        doc.moveLayer(fromIndex, toIndex)
+        updateLayerState()
+    }
     fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; updateLayerState() }
     fun duplicateLayer(id: Int) { _document?.duplicateLayer(id); updateLayerState() }
     fun mergeDown(id: Int) { _document?.mergeDown(id); updateLayerState() }
+    fun batchMergeLayers(ids: List<Int>) { _document?.batchMergeLayers(ids); updateLayerState() }
     fun moveLayerUp(id: Int) {
         val doc = _document ?: return
         val idx = doc.layers.indexOfFirst { it.id == id }; if (idx < 0 || idx >= doc.layers.size - 1) return
@@ -790,7 +992,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val doc = _document ?: return
         _layers.value = doc.layers.map {
             UiLayer(it.id, it.name, it.opacity, it.blendMode,
-                it.isVisible, it.isLocked, it.isClipToBelow, it.id == doc.activeLayerId)
+                it.isVisible, it.isLocked, it.isClipToBelow, it.id == doc.activeLayerId,
+                it.isAlphaLocked)
         }
     }
 

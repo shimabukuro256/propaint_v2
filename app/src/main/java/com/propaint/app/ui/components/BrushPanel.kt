@@ -64,7 +64,7 @@ fun BrushPanel(viewModel: PaintViewModel, onDismiss: () -> Unit, modifier: Modif
             Spacer(Modifier.height(12.dp))
 
             // 共通パラメータ
-            ParamSlider("サイズ", "${size.toInt()}px", size, 1f..2000f) { viewModel.setBrushSize(it) }
+            ParamSlider("サイズ", "${size.toInt()}px", size, 1f..500f) { viewModel.setBrushSize(it) }
             if (type.supportsOpacity) {
                 ParamSlider("不透明度", "${(opacity * 100).toInt()}%", opacity, 0.01f..1f) { viewModel.setBrushOpacity(it) }
             }

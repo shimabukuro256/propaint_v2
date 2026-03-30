@@ -22,5 +22,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Flutter UI ホスト Activity（ペイント画面） -->
+        <activity
+            android:name=".flutter.PaintFlutterActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density"
+            android:screenOrientation="sensorLandscape"
+            android:windowSoftInputMode="adjustResize"
+            android:hardwareAccelerated="true" />
     </application>
 </manifest>
