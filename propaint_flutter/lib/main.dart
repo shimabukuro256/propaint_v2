@@ -11,6 +11,10 @@ import 'widgets/brush_panel.dart';
 import 'widgets/color_picker_panel.dart';
 import 'widgets/layer_panel.dart';
 import 'widgets/side_quick_bar.dart';
+import 'widgets/selection_panel.dart';
+import 'widgets/transform_panel.dart';
+import 'widgets/shape_text_panel.dart';
+import 'widgets/filter_panel.dart';
 
 void main() => runApp(const ProPaintApp());
 
@@ -39,7 +43,7 @@ class ProPaintApp extends StatelessWidget {
 }
 
 /// 開いているパネル
-enum PanelType { none, brush, color, layer, menu }
+enum PanelType { none, brush, color, layer, menu, selection, transform, shapeText, filter }
 
 class PaintScaffold extends StatefulWidget {
   const PaintScaffold({super.key});
@@ -207,6 +211,38 @@ class _PaintScaffoldState extends State<PaintScaffold> {
               top: 60,
               right: 8,
               child: LayerPanel(state: _state, channel: _channel),
+            ),
+
+          // 選択パネル
+          if (_openPanel == PanelType.selection)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: SelectionPanel(state: _state, channel: _channel),
+            ),
+
+          // 変形パネル
+          if (_openPanel == PanelType.transform)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: TransformPanel(channel: _channel),
+            ),
+
+          // 図形・テキストパネル
+          if (_openPanel == PanelType.shapeText)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: ShapeTextPanel(state: _state, channel: _channel),
+            ),
+
+          // フィルターパネル
+          if (_openPanel == PanelType.filter)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: FilterPanel(channel: _channel),
             ),
 
           // スポイトモード表示

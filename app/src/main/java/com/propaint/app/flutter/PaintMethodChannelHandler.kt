@@ -305,6 +305,128 @@ class PaintMethodChannelHandler(
                 result.success(null)
             }
 
+            // ── 選択ツール ──
+            "selectRect" -> {
+                val l = call.argument<Int>("left") ?: 0; val t = call.argument<Int>("top") ?: 0
+                val r = call.argument<Int>("right") ?: 0; val b = call.argument<Int>("bottom") ?: 0
+                viewModel.selectRect(l, t, r, b); result.success(null)
+            }
+            "selectEllipse" -> {
+                val l = call.argument<Int>("left") ?: 0; val t = call.argument<Int>("top") ?: 0
+                val r = call.argument<Int>("right") ?: 0; val b = call.argument<Int>("bottom") ?: 0
+                viewModel.selectEllipse(l, t, r, b); result.success(null)
+            }
+            "selectByColor" -> {
+                val x = call.argument<Int>("x") ?: 0; val y = call.argument<Int>("y") ?: 0
+                val tol = call.argument<Int>("tolerance") ?: 32
+                val contiguous = call.argument<Boolean>("contiguous") ?: true
+                viewModel.selectByColor(x, y, tol, contiguous); result.success(null)
+            }
+            "selectAll" -> { viewModel.selectAll(); result.success(null) }
+            "clearSelection" -> { viewModel.clearSelection(); result.success(null) }
+            "invertSelection" -> { viewModel.invertSelection(); result.success(null) }
+
+            // ── 変形 ──
+            "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }
+            "flipLayerV" -> { viewModel.flipActiveLayerV(); result.success(null) }
+            "rotateLayer90CW" -> { viewModel.rotateActiveLayer90CW(); result.success(null) }
+            "transformLayer" -> {
+                val sx = call.argument<Double>("scaleX")?.toFloat() ?: 1f
+                val sy = call.argument<Double>("scaleY")?.toFloat() ?: 1f
+                val angle = call.argument<Double>("angle")?.toFloat() ?: 0f
+                val tx = call.argument<Double>("translateX")?.toFloat() ?: 0f
+                val ty = call.argument<Double>("translateY")?.toFloat() ?: 0f
+                launchHeavy(result) { viewModel.transformActiveLayer(sx, sy, angle, tx, ty) }
+            }
+
+            // ── レイヤーマスク ──
+            "addLayerMask" -> {
+                val fillWhite = call.argument<Boolean>("fillWhite") ?: true
+                viewModel.addMaskToActiveLayer(fillWhite); result.success(null)
+            }
+            "removeLayerMask" -> { viewModel.removeMaskFromActiveLayer(); result.success(null) }
+            "toggleMaskEnabled" -> { viewModel.toggleMaskEnabled(); result.success(null) }
+            "toggleEditMask" -> { viewModel.toggleEditMask(); result.success(null) }
+            "addMaskFromSelection" -> { viewModel.addMaskFromSelection(); result.success(null) }
+
+            // ── 図形・塗りつぶし ──
+            "drawShape" -> {
+                val type = call.argument<String>("type") ?: "rect"
+                val l = call.argument<Int>("left") ?: 0; val t = call.argument<Int>("top") ?: 0
+                val r = call.argument<Int>("right") ?: 0; val b = call.argument<Int>("bottom") ?: 0
+                val fill = call.argument<Boolean>("fill") ?: true
+                val thickness = call.argument<Double>("thickness")?.toFloat() ?: 1f
+                viewModel.drawShape(type, l, t, r, b, fill, thickness); result.success(null)
+            }
+            "floodFill" -> {
+                val x = call.argument<Int>("x") ?: 0; val y = call.argument<Int>("y") ?: 0
+                val tol = call.argument<Int>("tolerance") ?: 0
+                viewModel.floodFill(x, y, tol); result.success(null)
+            }
+
+            // ── テキスト ──
+            "addTextLayer" -> {
+                val text = call.argument<String>("text") ?: ""
+                val fontSize = call.argument<Double>("fontSize")?.toFloat() ?: 48f
+                val x = call.argument<Double>("x")?.toFloat() ?: 0f
+                val y = call.argument<Double>("y")?.toFloat() ?: 0f
+                val bold = call.argument<Boolean>("bold") ?: false
+                val italic = call.argument<Boolean>("italic") ?: false
+                val vertical = call.argument<Boolean>("vertical") ?: false
+                viewModel.addTextLayer(text, fontSize, x, y, bold, italic, vertical)
+                result.success(null)
+            }
+
+            // ── 追加フィルター ──
+            "applyUnsharpMask" -> {
+                val radius = call.argument<Int>("radius") ?: 1
+                val amount = call.argument<Double>("amount")?.toFloat() ?: 1f
+                val threshold = call.argument<Int>("threshold") ?: 0
+                launchHeavy(result) { viewModel.applyUnsharpMask(radius, amount, threshold) }
+            }
+            "applyMosaic" -> {
+                val blockSize = call.argument<Int>("blockSize") ?: 10
+                launchHeavy(result) { viewModel.applyMosaic(blockSize) }
+            }
+            "applyNoise" -> {
+                val amount = call.argument<Int>("amount") ?: 20
+                val mono = call.argument<Boolean>("monochrome") ?: true
+                launchHeavy(result) { viewModel.applyNoise(amount, mono) }
+            }
+            "applyPosterize" -> {
+                val levels = call.argument<Int>("levels") ?: 4
+                launchHeavy(result) { viewModel.applyPosterize(levels) }
+            }
+            "applyThreshold" -> {
+                val threshold = call.argument<Int>("threshold") ?: 128
+                launchHeavy(result) { viewModel.applyThreshold(threshold) }
+            }
+            "applyLevels" -> {
+                val inB = call.argument<Int>("inBlack") ?: 0
+                val inW = call.argument<Int>("inWhite") ?: 255
+                val gamma = call.argument<Double>("gamma")?.toFloat() ?: 1f
+                val outB = call.argument<Int>("outBlack") ?: 0
+                val outW = call.argument<Int>("outWhite") ?: 255
+                launchHeavy(result) { viewModel.applyLevels(inB, inW, gamma, outB, outW) }
+            }
+            "applyColorBalance" -> {
+                val cr = call.argument<Int>("cyanRed") ?: 0
+                val mg = call.argument<Int>("magentaGreen") ?: 0
+                val yb = call.argument<Int>("yellowBlue") ?: 0
+                launchHeavy(result) { viewModel.applyColorBalance(cr, mg, yb) }
+            }
+
+            // ── ツールモード ──
+            "setToolMode" -> {
+                val mode = call.argument<String>("mode") ?: "Draw"
+                try {
+                    viewModel.setToolMode(com.propaint.app.viewmodel.ToolMode.valueOf(mode))
+                    result.success(null)
+                } catch (e: IllegalArgumentException) {
+                    result.error("INVALID_ARG", "unknown tool mode: $mode", null)
+                }
+            }
+
             // ── 状態取得（一括） ──
             "getState" -> result.success(buildStateMap())
 
@@ -390,6 +512,11 @@ class PaintMethodChannelHandler(
                     .distinctUntilChanged()
                     .collect { sendDiff() }
             }
+            // ── 選択状態 (変更時のみ) ──
+            launch {
+                viewModel.hasSelection
+                    .collect { sendDiff() }
+            }
             // ── レイヤー (変更時のみ — 重いデータ) ──
             launch {
                 viewModel.layers
@@ -467,6 +594,7 @@ class PaintMethodChannelHandler(
             "canRedo" to viewModel.canRedo.value,
             "toolMode" to viewModel.toolMode.value.name,
             "isDrawing" to viewModel.isDrawing.value,
+            "hasSelection" to viewModel.hasSelection.value,
             "layers" to serializeLayers(viewModel.layers.value),
             "colorHistory" to viewModel.colorHistory.value.map { colorToArgbInt(it) },
             // デバイスメモリ情報
@@ -492,6 +620,11 @@ class PaintMethodChannelHandler(
                 "isClipToBelow" to layer.isClipToBelow,
                 "isActive" to layer.isActive,
                 "isAlphaLocked" to layer.isAlphaLocked,
+                "hasMask" to layer.hasMask,
+                "isMaskEnabled" to layer.isMaskEnabled,
+                "isEditingMask" to layer.isEditingMask,
+                "groupId" to layer.groupId,
+                "isTextLayer" to layer.isTextLayer,
             )
         }
 

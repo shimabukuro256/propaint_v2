@@ -22,6 +22,7 @@ class PaintState {
   final bool canRedo;
   final String toolMode;
   final bool isDrawing;
+  final bool hasSelection;
   final List<LayerInfo> layers;
 
   const PaintState({
@@ -46,6 +47,7 @@ class PaintState {
     this.canRedo = false,
     this.toolMode = 'Draw',
     this.isDrawing = false,
+    this.hasSelection = false,
     this.layers = const [],
   });
 
@@ -74,6 +76,7 @@ class PaintState {
       canRedo: m['canRedo'] as bool? ?? canRedo,
       toolMode: m['toolMode'] as String? ?? toolMode,
       isDrawing: m['isDrawing'] as bool? ?? isDrawing,
+      hasSelection: m['hasSelection'] as bool? ?? hasSelection,
       layers: m['layers'] != null
           ? (m['layers'] as List).map((e) => LayerInfo.fromMap(Map<String, dynamic>.from(e as Map))).toList()
           : layers,
@@ -91,6 +94,11 @@ class LayerInfo {
   final bool isClipToBelow;
   final bool isActive;
   final bool isAlphaLocked;
+  final bool hasMask;
+  final bool isMaskEnabled;
+  final bool isEditingMask;
+  final int groupId;
+  final bool isTextLayer;
 
   const LayerInfo({
     required this.id,
@@ -102,6 +110,11 @@ class LayerInfo {
     this.isClipToBelow = false,
     this.isActive = false,
     this.isAlphaLocked = false,
+    this.hasMask = false,
+    this.isMaskEnabled = false,
+    this.isEditingMask = false,
+    this.groupId = 0,
+    this.isTextLayer = false,
   });
 
   factory LayerInfo.fromMap(Map<String, dynamic> m) => LayerInfo(
@@ -114,6 +127,11 @@ class LayerInfo {
         isClipToBelow: m['isClipToBelow'] as bool? ?? false,
         isActive: m['isActive'] as bool? ?? false,
         isAlphaLocked: m['isAlphaLocked'] as bool? ?? false,
+        hasMask: m['hasMask'] as bool? ?? false,
+        isMaskEnabled: m['isMaskEnabled'] as bool? ?? false,
+        isEditingMask: m['isEditingMask'] as bool? ?? false,
+        groupId: (m['groupId'] as num?)?.toInt() ?? 0,
+        isTextLayer: m['isTextLayer'] as bool? ?? false,
       );
 }
 

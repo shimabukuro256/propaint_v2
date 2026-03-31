@@ -29,6 +29,11 @@ data class UiLayer(
     val isVisible: Boolean, val isLocked: Boolean,
     val isClipToBelow: Boolean, val isActive: Boolean,
     val isAlphaLocked: Boolean = false,
+    val hasMask: Boolean = false,
+    val isMaskEnabled: Boolean = false,
+    val isEditingMask: Boolean = false,
+    val groupId: Int = 0,
+    val isTextLayer: Boolean = false,
 )
 
 enum class BrushType(
@@ -42,7 +47,15 @@ enum class BrushType(
     Blur("ぼかし", supportsOpacity = false),
 }
 
-enum class ToolMode { Draw, Eyedropper }
+enum class ToolMode {
+    Draw, Eyedropper,
+    SelectRect, SelectEllipse, SelectLasso, SelectMagicWand,
+    SelectPen, SelectEraser,
+    Transform,
+    ShapeLine, ShapeRect, ShapeEllipse,
+    FloodFill, Gradient,
+    Text,
+}
 
 class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -830,6 +843,107 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         // スタイラス消しゴム端の自動検出
         val isEraserTip = event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
 
+        // 選択ツール (SelectRect / SelectEllipse): ドラッグで領域確定
+        if (_toolMode.value == ToolMode.SelectRect || _toolMode.value == ToolMode.SelectEllipse) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    // スクリーン座標で保持（MOVE でリアルタイム矩形更新するため）
+                    _selectionDragStart = event.x to event.y
+                    renderer.selDragRect = floatArrayOf(event.x, event.y, event.x, event.y)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val start = _selectionDragStart ?: return true
+                    val (sx, sy) = start
+                    renderer.selDragRect = floatArrayOf(
+                        min(sx, event.x), min(sy, event.y),
+                        max(sx, event.x), max(sy, event.y)
+                    )
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    renderer.selDragRect = null
+                    val start = _selectionDragStart
+                    if (start != null && event.actionMasked == MotionEvent.ACTION_UP) {
+                        val (sx, sy) = start
+                        val (docSX, docSY) = screenToDoc(sx, sy)
+                        val (docEX, docEY) = screenToDoc(event.x, event.y)
+                        val l = min(docSX, docEX).toInt(); val t = min(docSY, docEY).toInt()
+                        val r = max(docSX, docEX).toInt(); val b = max(docSY, docEY).toInt()
+                        if (_toolMode.value == ToolMode.SelectRect) selectRect(l, t, r, b)
+                        else selectEllipse(l, t, r, b)
+                    }
+                    _selectionDragStart = null
+                }
+            }
+            return true
+        }
+
+        // 自動選択 (MagicWand): タップ位置で色選択
+        if (_toolMode.value == ToolMode.SelectMagicWand) {
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                val (dx, dy) = screenToDoc(event.x, event.y)
+                selectByColor(dx.toInt(), dy.toInt())
+            }
+            return true
+        }
+
+        // 選択ペン / 選択消しペン: ブラシサイズでマスクをペイント
+        if (_toolMode.value == ToolMode.SelectPen || _toolMode.value == ToolMode.SelectEraser) {
+            val isAdd = _toolMode.value == ToolMode.SelectPen
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    doc.selectionManager.ensureMask()
+                    paintSelectionMask(event, doc, isAdd)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    paintSelectionMask(event, doc, isAdd)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    paintSelectionMask(event, doc, isAdd)
+                    _hasSelection.value = doc.selectionManager.hasSelection
+                    pushSelMaskToRenderer()
+                }
+            }
+            return true
+        }
+
+        // 図形ツール (ShapeLine / ShapeRect / ShapeEllipse): ドラッグで図形確定
+        if (_toolMode.value == ToolMode.ShapeLine ||
+            _toolMode.value == ToolMode.ShapeRect ||
+            _toolMode.value == ToolMode.ShapeEllipse) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    val (dx, dy) = screenToDoc(event.x, event.y)
+                    _shapeDragStart = dx to dy
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val start = _shapeDragStart
+                    if (start != null && event.actionMasked == MotionEvent.ACTION_UP) {
+                        val (sx, sy) = start
+                        val (ex, ey) = screenToDoc(event.x, event.y)
+                        val l = min(sx, ex).toInt(); val t = min(sy, ey).toInt()
+                        val r = max(sx, ex).toInt(); val b = max(sy, ey).toInt()
+                        val typeStr = when (_toolMode.value) {
+                            ToolMode.ShapeLine -> "line"
+                            ToolMode.ShapeRect -> "rect"
+                            else -> "ellipse"
+                        }
+                        drawShape(typeStr, l, t, r, b, fill = false, thickness = 3f)
+                    }
+                    _shapeDragStart = null
+                }
+            }
+            return true
+        }
+
+        // 塗りつぶし (FloodFill): タップ位置で塗りつぶし
+        if (_toolMode.value == ToolMode.FloodFill) {
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                val (dx, dy) = screenToDoc(event.x, event.y)
+                floodFill(dx.toInt(), dy.toInt())
+            }
+            return true
+        }
+
         // スポイトモード: タッチしている間連続サンプリング
         if (_toolMode.value == ToolMode.Eyedropper) {
             when (event.actionMasked) {
@@ -914,6 +1028,22 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var multiTouchAccidentalStroke = false
     // タップアクション発火済みフラグ（二重発火防止）
     private var tapActionFired = false
+
+    /** 選択ツールのドラッグ開始座標 (スクリーン座標) */
+    private var _selectionDragStart: Pair<Float, Float>? = null
+    /** 図形ツールのドラッグ開始座標 (ドキュメント座標) */
+    private var _shapeDragStart: Pair<Float, Float>? = null
+
+    /** 選択ペン/消しペン: ブラシサイズの円で選択マスクをペイント */
+    private fun paintSelectionMask(event: MotionEvent, doc: CanvasDocument, isAdd: Boolean) {
+        val radius = max(1f, _brushSize.value / 2f)
+        for (h in 0 until event.historySize) {
+            val (dx, dy) = screenToDoc(event.getHistoricalX(h), event.getHistoricalY(h))
+            doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd)
+        }
+        val (dx, dy) = screenToDoc(event.x, event.y)
+        doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd)
+    }
 
     private fun handleMultiTouch(event: MotionEvent) {
         if (!isMultiTouch && _isDrawing.value) {
@@ -1234,12 +1364,280 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _layers.value = doc.layers.map {
             UiLayer(it.id, it.name, it.opacity, it.blendMode,
                 it.isVisible, it.isLocked, it.isClipToBelow, it.id == doc.activeLayerId,
-                it.isAlphaLocked)
+                it.isAlphaLocked,
+                hasMask = it.mask != null,
+                isMaskEnabled = it.isMaskEnabled,
+                isEditingMask = it.isEditingMask,
+                groupId = it.groupId,
+                isTextLayer = it.textConfig != null)
         }
     }
 
     private fun updateUndoState() {
         val doc = _document ?: return
         _canUndo.value = doc.canUndo; _canRedo.value = doc.canRedo
+    }
+
+    // ── 選択ツール ──────────────────────────────────────────────
+
+    /** 選択状態 */
+    private val _hasSelection = MutableStateFlow(false)
+    val hasSelection: StateFlow<Boolean> = _hasSelection.asStateFlow()
+
+    private val _selectionMode = MutableStateFlow(com.propaint.app.engine.SelectionMode.Replace)
+    val selectionMode: StateFlow<com.propaint.app.engine.SelectionMode> = _selectionMode.asStateFlow()
+
+    fun setSelectionMode(mode: com.propaint.app.engine.SelectionMode) { _selectionMode.value = mode }
+
+    /** 選択マスクを GL レンダラーに送る */
+    private fun pushSelMaskToRenderer() {
+        val doc = _document ?: return
+        val mask = doc.selectionManager.mask
+        renderer.pendingSelMask.set(mask?.copyOf())
+        renderer.selMaskDirty = true
+    }
+
+    fun selectRect(left: Int, top: Int, right: Int, bottom: Int) {
+        val doc = _document ?: return
+        doc.selectionManager.selectRect(left, top, right, bottom, _selectionMode.value)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun selectEllipse(left: Int, top: Int, right: Int, bottom: Int) {
+        val doc = _document ?: return
+        doc.selectionManager.selectEllipse(left, top, right, bottom, _selectionMode.value)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun selectLasso(points: List<Pair<Int, Int>>) {
+        val doc = _document ?: return
+        doc.selectionManager.selectLasso(points, _selectionMode.value)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun selectByColor(x: Int, y: Int, tolerance: Int = 32, contiguous: Boolean = true) {
+        val doc = _document ?: return
+        val layer = doc.getActiveLayer() ?: return
+        doc.selectionManager.selectByColor(layer.content, x, y, tolerance, contiguous, _selectionMode.value)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun invertSelection() {
+        val doc = _document ?: return
+        doc.selectionManager.invertSelection()
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun clearSelection() {
+        val doc = _document ?: return
+        doc.selectionManager.clearSelection()
+        _hasSelection.value = false
+        pushSelMaskToRenderer()
+    }
+
+    fun selectAll() {
+        val doc = _document ?: return
+        doc.selectionManager.selectAll()
+        _hasSelection.value = true
+        pushSelMaskToRenderer()
+    }
+
+    fun expandSelection(amount: Int) {
+        _document?.selectionManager?.expandContract(amount)
+        pushSelMaskToRenderer()
+    }
+    fun featherSelection(radius: Int) {
+        _document?.selectionManager?.feather(radius)
+        pushSelMaskToRenderer()
+    }
+
+    // ── 変形ツール ──────────────────────────────────────────────
+
+    fun transformActiveLayer(scaleX: Float, scaleY: Float, angleDeg: Float, tx: Float, ty: Float) {
+        val doc = _document ?: return
+        val cx = doc.width / 2f; val cy = doc.height / 2f
+        doc.transformLayer(doc.activeLayerId, cx, cy, scaleX, scaleY, angleDeg, tx, ty)
+        updateUndoState()
+    }
+
+    fun flipActiveLayerH() { _document?.flipLayerH(_document?.activeLayerId ?: return); updateUndoState() }
+    fun flipActiveLayerV() { _document?.flipLayerV(_document?.activeLayerId ?: return); updateUndoState() }
+    fun rotateActiveLayer90CW() { _document?.rotateLayer90CW(_document?.activeLayerId ?: return); updateUndoState() }
+
+    // ── レイヤーマスク ──────────────────────────────────────────
+
+    fun addMaskToActiveLayer(fillWhite: Boolean = true) {
+        val doc = _document ?: return
+        doc.addLayerMask(doc.activeLayerId, fillWhite)
+        updateLayerState()
+    }
+
+    fun removeMaskFromActiveLayer() {
+        val doc = _document ?: return
+        doc.removeLayerMask(doc.activeLayerId)
+        updateLayerState()
+    }
+
+    fun toggleMaskEnabled() {
+        val doc = _document ?: return
+        doc.toggleMaskEnabled(doc.activeLayerId)
+        updateLayerState()
+    }
+
+    fun toggleEditMask() {
+        val doc = _document ?: return
+        doc.toggleEditMask(doc.activeLayerId)
+        updateLayerState()
+    }
+
+    fun addMaskFromSelection() {
+        val doc = _document ?: return
+        doc.addMaskFromSelection(doc.activeLayerId)
+        updateLayerState()
+    }
+
+    // ── レイヤーグループ ────────────────────────────────────────
+
+    fun createGroup(name: String) {
+        val doc = _document ?: return
+        doc.createLayerGroup(name)
+    }
+
+    fun deleteGroup(groupId: Int) {
+        val doc = _document ?: return
+        doc.deleteLayerGroup(groupId)
+        updateLayerState()
+    }
+
+    fun setActiveLayerGroup(groupId: Int) {
+        val doc = _document ?: return
+        doc.setLayerGroup(doc.activeLayerId, groupId)
+        updateLayerState()
+    }
+
+    // ── 図形・塗りつぶし ────────────────────────────────────────
+
+    fun setToolMode(mode: ToolMode) { _toolMode.value = mode }
+
+    fun drawShape(shapeType: String, left: Int, top: Int, right: Int, bottom: Int, fill: Boolean, thickness: Float = 1f) {
+        val doc = _document ?: return
+        val colorInt = colorToArgbInt(_currentColor.value)
+        val premul = com.propaint.app.engine.PixelOps.premultiply(colorInt)
+        doc.drawShape(doc.activeLayerId, shapeType, left, top, right, bottom, premul, fill, thickness)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun floodFill(x: Int, y: Int, tolerance: Int = 0) {
+        val doc = _document ?: return
+        val colorInt = colorToArgbInt(_currentColor.value)
+        val premul = com.propaint.app.engine.PixelOps.premultiply(colorInt)
+        doc.floodFill(doc.activeLayerId, x, y, premul, tolerance)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun drawGradient(startX: Float, startY: Float, endX: Float, endY: Float,
+                     startColor: Int, endColor: Int, type: com.propaint.app.engine.ShapeRenderer.GradientType) {
+        val doc = _document ?: return
+        doc.drawGradient(doc.activeLayerId, startX, startY, endX, endY, startColor, endColor, type)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    // ── テキストレイヤー ────────────────────────────────────────
+
+    fun addTextLayer(text: String, fontSize: Float = 48f, x: Float = 0f, y: Float = 0f,
+                     bold: Boolean = false, italic: Boolean = false, vertical: Boolean = false) {
+        val doc = _document ?: return
+        val colorInt = colorToArgbInt(_currentColor.value)
+        val premul = com.propaint.app.engine.PixelOps.premultiply(colorInt)
+        val config = com.propaint.app.engine.TextRenderer.TextConfig(
+            text = text, fontSize = fontSize, color = premul,
+            isBold = bold, isItalic = italic, isVertical = vertical,
+            x = x, y = y
+        )
+        doc.addTextLayer(config)
+        hasUnsavedChanges = true; updateLayerState(); updateUndoState()
+    }
+
+    fun updateTextLayer(layerId: Int, text: String, fontSize: Float = 48f, x: Float = 0f, y: Float = 0f,
+                        bold: Boolean = false, italic: Boolean = false, vertical: Boolean = false) {
+        val doc = _document ?: return
+        val colorInt = colorToArgbInt(_currentColor.value)
+        val premul = com.propaint.app.engine.PixelOps.premultiply(colorInt)
+        val config = com.propaint.app.engine.TextRenderer.TextConfig(
+            text = text, fontSize = fontSize, color = premul,
+            isBold = bold, isItalic = italic, isVertical = vertical,
+            x = x, y = y
+        )
+        doc.updateTextLayer(layerId, config)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    // ── 追加フィルター ──────────────────────────────────────────
+
+    fun applyToneCurve(masterPoints: List<Pair<Int, Int>>? = null,
+                       redPoints: List<Pair<Int, Int>>? = null,
+                       greenPoints: List<Pair<Int, Int>>? = null,
+                       bluePoints: List<Pair<Int, Int>>? = null) {
+        val doc = _document ?: return
+        val master = masterPoints?.let { com.propaint.app.engine.FilterOps.buildCurveLut(it) }
+        val red = redPoints?.let { com.propaint.app.engine.FilterOps.buildCurveLut(it) }
+        val green = greenPoints?.let { com.propaint.app.engine.FilterOps.buildCurveLut(it) }
+        val blue = bluePoints?.let { com.propaint.app.engine.FilterOps.buildCurveLut(it) }
+        doc.applyToneCurve(doc.activeLayerId, master, red, green, blue)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyLevels(inBlack: Int = 0, inWhite: Int = 255, gamma: Float = 1f,
+                    outBlack: Int = 0, outWhite: Int = 255) {
+        val doc = _document ?: return
+        doc.applyLevels(doc.activeLayerId, inBlack, inWhite, gamma, outBlack, outWhite)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyColorBalance(cyanRed: Int, magentaGreen: Int, yellowBlue: Int) {
+        val doc = _document ?: return
+        doc.applyColorBalance(doc.activeLayerId, cyanRed, magentaGreen, yellowBlue)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyUnsharpMask(radius: Int = 1, amount: Float = 1f, threshold: Int = 0) {
+        val doc = _document ?: return
+        doc.applyUnsharpMask(doc.activeLayerId, radius, amount, threshold)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyMosaic(blockSize: Int) {
+        val doc = _document ?: return
+        doc.applyMosaic(doc.activeLayerId, blockSize)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyNoise(amount: Int, monochrome: Boolean = true) {
+        val doc = _document ?: return
+        doc.applyNoise(doc.activeLayerId, amount, monochrome)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyPosterize(levels: Int) {
+        val doc = _document ?: return
+        doc.applyPosterize(doc.activeLayerId, levels)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyThreshold(threshold: Int) {
+        val doc = _document ?: return
+        doc.applyThreshold(doc.activeLayerId, threshold)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyGradientMap(gradientLut: IntArray) {
+        val doc = _document ?: return
+        doc.applyGradientMap(doc.activeLayerId, gradientLut)
+        hasUnsavedChanges = true; updateUndoState()
     }
 }

@@ -11,6 +11,7 @@ import kotlin.math.sqrt
  */
 class BrushEngine(
     private val dirtyTracker: DirtyTileTracker,
+    var selectionManager: SelectionManager? = null,
 ) {
     // ── ストローク状態 ──────────────────────────────────────────────
 
@@ -546,12 +547,19 @@ class BrushEngine(
 
         val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
         val kr = maxOf(1, safeRadius / 3)
+        val sm = selectionManager
 
         // ── Direct モード: content を直接ぼかし (リニアライト空間) ────
         if (drawTarget === sampleSource) {
             // 入力: sRGB → リニア変換
+            // 選択マスク有効時は選択範囲外のピクセルを透明にしてから入力
             for (ly in 0 until h) for (lx in 0 until w) {
-                val px = drawTarget.getPixelAt(x0 + lx, y0 + ly)
+                val gx = x0 + lx; val gy = y0 + ly
+                var px = drawTarget.getPixelAt(gx, gy)
+                // 選択範囲外のピクセルは透明に置き換え（ぼかし計算に影響させない）
+                if (sm != null && sm.getMaskValue(gx, gy) < 255) {
+                    px = 0
+                }
                 blurSrc[ly * w + lx] = px
                 blurLinSrc[ly * w + lx] = PixelOps.pixelToLinear64(px)
             }
@@ -611,9 +619,16 @@ class BrushEngine(
 
         for (ly in 0 until h) for (lx in 0 until w) {
             val px = x0 + lx; val py = y0 + ly
-            val subPx = drawTarget.getPixelAt(px, py)
-            val contPx = sampleSource.getPixelAt(px, py)
+            var subPx = drawTarget.getPixelAt(px, py)
+            var contPx = sampleSource.getPixelAt(px, py)
             val idx = ly * w + lx
+
+            // 選択マスク有効時は選択範囲外のピクセルを透明に置き換え
+            if (sm != null && sm.getMaskValue(px, py) < 255) {
+                subPx = 0
+                contPx = 0
+            }
+
             val comp = PixelOps.blendSrcOver(contPx, subPx)
             blurSrc[idx] = comp
             blurLinSrc[idx] = PixelOps.pixelToLinear64(comp)

@@ -15,6 +15,19 @@ class Layer(
 ) {
     /** Indirect 描画用サブレイヤー */
     var sublayer: TiledSurface? = null
+
+    /** レイヤーマスク (null = マスクなし) */
+    var mask: TiledSurface? = null
+    /** マスクを有効にするか */
+    var isMaskEnabled: Boolean = true
+    /** マスクを編集中か (true の場合、ブラシ操作はマスクに適用される) */
+    var isEditingMask: Boolean = false
+
+    /** レイヤーグループ ID (0 = グループなし) */
+    var groupId: Int = 0
+
+    /** テキストレイヤーの設定 (null = 通常レイヤー) */
+    var textConfig: TextRenderer.TextConfig? = null
 }
 
 /**
@@ -37,7 +50,7 @@ class CanvasDocument(val width: Int, val height: Int) {
     }
 
     val dirtyTracker = DirtyTileTracker()
-    val brushEngine = BrushEngine(dirtyTracker)
+    val brushEngine by lazy { BrushEngine(dirtyTracker, selectionManager) }
 
     private val lock = ReentrantLock()
     private val _layers = ArrayList<Layer>()
@@ -225,6 +238,9 @@ class CanvasDocument(val width: Int, val height: Int) {
 
     // ── 描画操作 ────────────────────────────────────────────────────
 
+    /** 選択マスクが有効な場合のストローク前スナップショット (選択範囲外の復元用) */
+    private var _strokeSelSnapshot: IntArray? = null
+
     fun beginStroke(brush: BrushConfig) = lock.withLock {
         val layer = getActiveLayer() ?: return
         if (layer.isLocked) {
@@ -236,6 +252,11 @@ class CanvasDocument(val width: Int, val height: Int) {
         forceEndStrokeIfNeeded()
 
         pushUndoTileDelta(layer)
+
+        // 選択マスクが有効な場合: ストローク前の状態をスナップショット
+        _strokeSelSnapshot = if (selectionManager.hasSelection) {
+            layer.content.toPixelArray()
+        } else null
 
         // BrushEngine にストローク開始レイヤーを記録
         brushEngine.beginStroke(layer.id)
@@ -277,11 +298,22 @@ class CanvasDocument(val width: Int, val height: Int) {
         if (layer != null) {
             val sub = layer.sublayer
             if (sub != null) {
+                // 選択マスクが有効な場合: サブレイヤーの選択範囲外ピクセルを除去してから合成
+                // → Indirect ブラシ (筆/水彩) が境界で範囲外ピクセルをブレンドするのを防ぐ
+                if (selectionManager.hasSelection) {
+                    maskSublayerWithSelection(sub)
+                }
                 // サブレイヤーを本体に opacity で合成 (Drawpile merge_sublayer)
-                val op255 = (brush.opacity * 255f).toInt().coerceIn(0, 255)
                 compositeTwoLayers(layer.content, sub, brush.opacity, PixelOps.BLEND_NORMAL)
                 layer.sublayer = null
             }
+
+            // 選択マスクが有効な場合: 選択範囲外のピクセルを元に戻す
+            val snap = _strokeSelSnapshot
+            if (snap != null && selectionManager.hasSelection) {
+                restoreOutsideSelection(layer.content, snap)
+            }
+            _strokeSelSnapshot = null
         }
         // COW 参照を解放してからクリア
         for (e in redoStack) releaseUndoEntry(e)
@@ -301,7 +333,6 @@ class CanvasDocument(val width: Int, val height: Int) {
         if (layer != null) {
             val sub = layer.sublayer
             if (sub != null) {
-                val op255 = (brush.opacity * 255f).toInt().coerceIn(0, 255)
                 compositeTwoLayers(layer.content, sub, brush.opacity, PixelOps.BLEND_NORMAL)
                 layer.sublayer = null
             }
@@ -339,6 +370,12 @@ class CanvasDocument(val width: Int, val height: Int) {
         var isBaseVisible = false
 
         for (layer in _layers) {
+            // --- グループ非表示チェック ---
+            if (layer.groupId > 0) {
+                val group = _layerGroups[layer.groupId]
+                if (group != null && !group.isVisible) continue
+            }
+
             // --- クリッピングベース状態の更新 ---
             // 非クリッピングレイヤー = 新しいベース候補
             if (!layer.isClipToBelow) {
@@ -397,9 +434,24 @@ class CanvasDocument(val width: Int, val height: Int) {
                 else -> mainTile!!.pixels
             }
 
+            // レイヤーマスク適用
+            val maskedPixels = if (layer.mask != null && layer.isMaskEnabled) {
+                val copy = srcPixels.copyOf()
+                LayerMaskOps.applyMaskToTile(copy, layer.mask!!, tx, ty)
+                copy
+            } else {
+                srcPixels
+            }
+
+            // グループ不透明度の乗算
+            val effectiveOp255 = if (layer.groupId > 0) {
+                val group = _layerGroups[layer.groupId]
+                if (group != null) (op255 * group.opacity).toInt().coerceIn(0, 255) else op255
+            } else op255
+
             // クリッピング
             if (layer.isClipToBelow && clipBaseTile != null) {
-                val clipped = srcPixels.copyOf()
+                val clipped = maskedPixels.copyOf()
                 for (i in 0 until Tile.LENGTH) {
                     val ma = PixelOps.alpha(clipBaseTile[i])
                     if (ma < 255) {
@@ -415,10 +467,10 @@ class CanvasDocument(val width: Int, val height: Int) {
                         }
                     }
                 }
-                PixelOps.compositeLayer(result, clipped, op255, layer.blendMode)
+                PixelOps.compositeLayer(result, clipped, effectiveOp255, layer.blendMode)
             } else {
-                PixelOps.compositeLayer(result, srcPixels, op255, layer.blendMode)
-                clipBaseTile = srcPixels // 次のクリッピング用ベース更新
+                PixelOps.compositeLayer(result, maskedPixels, effectiveOp255, layer.blendMode)
+                clipBaseTile = maskedPixels // 次のクリッピング用ベース更新
             }
         }
     }
@@ -436,7 +488,6 @@ class CanvasDocument(val width: Int, val height: Int) {
     // ── フィルター ──────────────────────────────────────────────────
 
     fun applyHslFilter(layerId: Int, hue: Float, sat: Float, lit: Float) = lock.withLock {
-        // NaN/Infinity 防御
         if (hue.isNaN() || hue.isInfinite() || sat.isNaN() || sat.isInfinite() || lit.isNaN() || lit.isInfinite()) {
             PaintDebug.assertFail("HSL filter NaN/Inf: hue=$hue sat=$sat lit=$lit")
             return
@@ -445,26 +496,23 @@ class CanvasDocument(val width: Int, val height: Int) {
         val layer = _layers.find { it.id == layerId } ?: return
         PaintDebug.d(PaintDebug.Layer) { "[applyHslFilter] layerId=$layerId hue=$hue sat=$sat lit=$lit" }
         pushUndoTileDelta(layer)
-        for (i in layer.content.tiles.indices) {
-            val tile = layer.content.tiles[i] ?: continue
-            val mt = if (tile.refCount > 1) { tile.decRef(); tile.mutableCopy().also { layer.content.tiles[i] = it } } else tile
-            for (p in mt.pixels.indices) {
-                val c = mt.pixels[p]; val a = PixelOps.alpha(c); if (a == 0) continue
+        applyFilterWithSelection(layer) { pixels ->
+            val hsv = FloatArray(3)
+            for (i in pixels.indices) {
+                val c = pixels[i]; val a = PixelOps.alpha(c); if (a == 0) continue
                 val up = PixelOps.unpremultiply(c)
-                val hsv = FloatArray(3)
                 android.graphics.Color.RGBToHSV(PixelOps.red(up), PixelOps.green(up), PixelOps.blue(up), hsv)
                 hsv[0] = (hsv[0] + hue + 360f) % 360f
                 hsv[1] = (hsv[1] + sat).coerceIn(0f, 1f)
                 hsv[2] = (hsv[2] + lit).coerceIn(0f, 1f)
                 val rgb = android.graphics.Color.HSVToColor(a, hsv)
-                mt.pixels[p] = PixelOps.premultiply(rgb)
+                pixels[i] = PixelOps.premultiply(rgb)
             }
         }
         dirtyTracker.markFullRebuild()
     }
 
     fun applyBrightnessContrast(layerId: Int, brightness: Float, contrast: Float) = lock.withLock {
-        // NaN/Infinity 防御
         if (brightness.isNaN() || brightness.isInfinite() || contrast.isNaN() || contrast.isInfinite()) {
             PaintDebug.assertFail("brightnessContrast NaN/Inf: brightness=$brightness contrast=$contrast")
             return
@@ -473,21 +521,16 @@ class CanvasDocument(val width: Int, val height: Int) {
         val layer = _layers.find { it.id == layerId } ?: return
         PaintDebug.d(PaintDebug.Layer) { "[applyBrightnessContrast] layerId=$layerId brightness=$brightness contrast=$contrast" }
         pushUndoTileDelta(layer)
-        // contrast をクランプして分母ゼロ回避 (259/255 ≈ 1.016 で分母=0)
         val safeContrast = contrast.coerceIn(-1f, 0.99f)
         val factor = (259f * (safeContrast * 255f + 255f)) / (255f * (259f - safeContrast * 255f))
-        for (i in layer.content.tiles.indices) {
-            val tile = layer.content.tiles[i] ?: continue
-            val mt = if (tile.refCount > 1) { tile.decRef(); tile.mutableCopy().also { layer.content.tiles[i] = it } } else tile
-            for (p in mt.pixels.indices) {
-                val c = mt.pixels[p]; val a = PixelOps.alpha(c); if (a == 0) continue
+        applyFilterWithSelection(layer) { pixels ->
+            for (i in pixels.indices) {
+                val c = pixels[i]; val a = PixelOps.alpha(c); if (a == 0) continue
                 val up = PixelOps.unpremultiply(c)
                 var r = PixelOps.red(up); var g = PixelOps.green(up); var b = PixelOps.blue(up)
-                // brightness
                 r = (r + brightness * 255f).toInt(); g = (g + brightness * 255f).toInt(); b = (b + brightness * 255f).toInt()
-                // contrast
                 r = (factor * (r - 128) + 128).toInt(); g = (factor * (g - 128) + 128).toInt(); b = (factor * (b - 128) + 128).toInt()
-                mt.pixels[p] = PixelOps.premultiply(PixelOps.pack(a, r.coerceIn(0,255), g.coerceIn(0,255), b.coerceIn(0,255)))
+                pixels[i] = PixelOps.premultiply(PixelOps.pack(a, r.coerceIn(0,255), g.coerceIn(0,255), b.coerceIn(0,255)))
             }
         }
         dirtyTracker.markFullRebuild()
@@ -504,20 +547,19 @@ class CanvasDocument(val width: Int, val height: Int) {
         PaintDebug.d(PaintDebug.Layer) { "[applyBlurFilter] layerId=$layerId radius=$safeRadius type=$blurType" }
         pushUndoTileDelta(layer)
 
-        val src = layer.content.toPixelArray()
         val w = layer.content.width; val h = layer.content.height
-
-        when (blurType) {
-            BLUR_GAUSSIAN -> {
-                val buf = src.copyOf()
-                boxBlurPass(src, buf, w, h, safeRadius)
-                boxBlurPass(buf, src, w, h, safeRadius)
-                boxBlurPass(src, buf, w, h, safeRadius)
-                writePixelsToLayer(layer, buf, w, h)
-            }
-            BLUR_STACK -> {
-                stackBlur(src, w, h, safeRadius)
-                writePixelsToLayer(layer, src, w, h)
+        applyFilterWithSelection(layer) { pixels ->
+            when (blurType) {
+                BLUR_GAUSSIAN -> {
+                    val buf = pixels.copyOf()
+                    boxBlurPass(pixels, buf, w, h, safeRadius)
+                    boxBlurPass(buf, pixels, w, h, safeRadius)
+                    boxBlurPass(pixels, buf, w, h, safeRadius)
+                    System.arraycopy(buf, 0, pixels, 0, pixels.size)
+                }
+                BLUR_STACK -> {
+                    stackBlur(pixels, w, h, safeRadius)
+                }
             }
         }
         dirtyTracker.markFullRebuild()
@@ -1065,5 +1107,452 @@ class CanvasDocument(val width: Int, val height: Int) {
             }
         }
         return out
+    }
+
+    // ── 選択ツール統合 ──────────────────────────────────────────
+
+    val selectionManager: SelectionManager by lazy { SelectionManager(width, height) }
+
+    /**
+     * 選択範囲外のピクセルを元の状態に復元する。
+     * ブラシストローク/フィルタ後に呼び出し、選択範囲内のみ変更を適用する。
+     */
+    private fun restoreOutsideSelection(surface: TiledSurface, originalPixels: IntArray) {
+        val w = width; val h = height
+        val sm = selectionManager
+        for (ty in 0 until surface.tilesY) {
+            for (tx in 0 until surface.tilesX) {
+                val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+                var needsRestore = false
+                // このタイル内に選択範囲外ピクセルがあるかチェック
+                check@ for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        if (sm.getMaskValue(px, py) < 255) { needsRestore = true; break@check }
+                    }
+                }
+                if (!needsRestore) continue
+                val tile = surface.getOrCreateMutable(tx, ty)
+                for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        val maskVal = sm.getMaskValue(px, py)
+                        if (maskVal == 255) continue  // 完全選択 → 変更後の値を維持
+                        val idx = ly * Tile.SIZE + lx
+                        val origPixel = originalPixels[py * w + px]
+                        if (maskVal == 0) {
+                            // 選択範囲外 → 元に戻す
+                            tile.pixels[idx] = origPixel
+                        } else {
+                            // 部分選択 → ブレンド
+                            val newPixel = tile.pixels[idx]
+                            tile.pixels[idx] = blendSelectionPixel(origPixel, newPixel, maskVal / 255f)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * サブレイヤーの選択範囲外ピクセルをゼロクリアする。
+     * Indirect ブラシ (筆/水彩) が選択境界でサンプリングした範囲外色を
+     * 合成に持ち込まないようにする。
+     */
+    private fun maskSublayerWithSelection(sub: TiledSurface) {
+        val w = width; val h = height
+        val sm = selectionManager
+        for (ty in 0 until sub.tilesY) {
+            for (tx in 0 until sub.tilesX) {
+                val tile = sub.getTile(tx, ty) ?: continue
+                val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+                var modified = false
+                for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        val maskVal = sm.getMaskValue(px, py)
+                        if (maskVal == 255) continue  // 完全選択 → そのまま
+                        val idx = ly * Tile.SIZE + lx
+                        if (maskVal == 0) {
+                            // 選択範囲外 → ゼロクリア
+                            if (tile.pixels[idx] != 0) {
+                                tile.pixels[idx] = 0
+                                modified = true
+                            }
+                        } else {
+                            // 部分選択 → マスク値に応じて減衰
+                            val p = tile.pixels[idx]
+                            if (p != 0) {
+                                val f = maskVal / 255f
+                                tile.pixels[idx] = PixelOps.pack(
+                                    (PixelOps.alpha(p) * f).toInt().coerceIn(0, 255),
+                                    (PixelOps.red(p) * f).toInt().coerceIn(0, 255),
+                                    (PixelOps.green(p) * f).toInt().coerceIn(0, 255),
+                                    (PixelOps.blue(p) * f).toInt().coerceIn(0, 255),
+                                )
+                                modified = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** 2ピクセルを選択マスク値でブレンドする */
+    private fun blendSelectionPixel(orig: Int, modified: Int, selAlpha: Float): Int {
+        val ia = 1f - selAlpha
+        return PixelOps.pack(
+            (PixelOps.alpha(orig) * ia + PixelOps.alpha(modified) * selAlpha).toInt().coerceIn(0, 255),
+            (PixelOps.red(orig) * ia + PixelOps.red(modified) * selAlpha).toInt().coerceIn(0, 255),
+            (PixelOps.green(orig) * ia + PixelOps.green(modified) * selAlpha).toInt().coerceIn(0, 255),
+            (PixelOps.blue(orig) * ia + PixelOps.blue(modified) * selAlpha).toInt().coerceIn(0, 255),
+        )
+    }
+
+    /**
+     * フィルタをピクセル配列に適用し、選択マスクを考慮してレイヤーに書き戻す。
+     * 選択がない場合はフィルタ結果をそのまま書き戻す。
+     */
+    private fun applyFilterWithSelection(layer: Layer, action: (IntArray) -> Unit) {
+        val pixels = layer.content.toPixelArray()
+        val originalPixels = if (selectionManager.hasSelection) pixels.copyOf() else null
+        action(pixels)
+        if (originalPixels != null) {
+            // 選択範囲外のピクセルを元に戻す
+            val w = width; val h = height
+            for (i in pixels.indices) {
+                val y = i / w; val x = i % w
+                val maskVal = selectionManager.getMaskValue(x, y)
+                if (maskVal == 255) continue
+                if (maskVal == 0) {
+                    pixels[i] = originalPixels[i]
+                } else {
+                    pixels[i] = blendSelectionPixel(originalPixels[i], pixels[i], maskVal / 255f)
+                }
+            }
+        }
+        writePixelsToLayer(layer, pixels, width, height)
+    }
+
+    // ── レイヤーグループ ────────────────────────────────────────
+
+    private val _layerGroups = HashMap<Int, LayerGroupInfo>()
+    val layerGroups: Map<Int, LayerGroupInfo> get() = _layerGroups
+    private var nextGroupId = 1
+
+    fun createLayerGroup(name: String): LayerGroupInfo = lock.withLock {
+        val group = LayerGroupInfo(nextGroupId++, name)
+        _layerGroups[group.id] = group
+        PaintDebug.d(PaintDebug.Layer) { "[createLayerGroup] id=${group.id} name=$name" }
+        group
+    }
+
+    fun deleteLayerGroup(groupId: Int) = lock.withLock {
+        _layerGroups.remove(groupId)
+        // グループ内のレイヤーをグループ解除
+        for (layer in _layers) {
+            if (layer.groupId == groupId) layer.groupId = 0
+        }
+        PaintDebug.d(PaintDebug.Layer) { "[deleteLayerGroup] id=$groupId" }
+    }
+
+    fun setLayerGroup(layerId: Int, groupId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        layer.groupId = groupId
+    }
+
+    fun setGroupVisibility(groupId: Int, visible: Boolean) = lock.withLock {
+        _layerGroups[groupId]?.isVisible = visible
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun setGroupOpacity(groupId: Int, opacity: Float) = lock.withLock {
+        _layerGroups[groupId]?.opacity = opacity.coerceIn(0f, 1f)
+        dirtyTracker.markFullRebuild()
+    }
+
+    // ── レイヤーマスク ──────────────────────────────────────────
+
+    fun addLayerMask(layerId: Int, fillWhite: Boolean = true) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.mask != null) return  // 既にマスクがある
+        layer.mask = LayerMaskOps.createMask(width, height, fillWhite)
+        layer.isMaskEnabled = true
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[addLayerMask] layerId=$layerId fillWhite=$fillWhite" }
+    }
+
+    fun removeLayerMask(layerId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        layer.mask = null
+        layer.isMaskEnabled = false
+        layer.isEditingMask = false
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[removeLayerMask] layerId=$layerId" }
+    }
+
+    fun toggleMaskEnabled(layerId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        layer.isMaskEnabled = !layer.isMaskEnabled
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun toggleEditMask(layerId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        layer.isEditingMask = !layer.isEditingMask
+    }
+
+    fun addMaskFromSelection(layerId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (!selectionManager.hasSelection) return
+        layer.mask = LayerMaskOps.createMaskFromSelection(selectionManager)
+        layer.isMaskEnabled = true
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[addMaskFromSelection] layerId=$layerId" }
+    }
+
+    // ── 変形操作 ────────────────────────────────────────────────
+
+    fun transformLayer(
+        layerId: Int, centerX: Float, centerY: Float,
+        scaleX: Float, scaleY: Float, angleDeg: Float,
+        translateX: Float, translateY: Float,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.freeTransform(layer.content, centerX, centerY, scaleX, scaleY, angleDeg, translateX, translateY, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun flipLayerH(layerId: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.flipHorizontal(layer.content, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun flipLayerV(layerId: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.flipVertical(layer.content, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun rotateLayer90CW(layerId: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.rotate90CW(layer.content, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    /**
+     * 変形操作を選択マスク付きで実行する。
+     * 選択マスク情報を TransformManager に渡し、選択範囲内のピクセルのみを処理。
+     * 変形後に選択範囲外のピクセルを元に戻す。
+     */
+    private inline fun applyTransformWithSelection(layer: Layer, action: () -> Unit) {
+        val originalPixels = if (selectionManager.hasSelection) {
+            layer.content.toPixelArray()
+        } else null
+
+        action()
+
+        if (originalPixels != null) {
+            restoreOutsideSelection(layer.content, originalPixels)
+        }
+    }
+
+    /** TransformManager 用選択マスク取得 */
+    private fun getSelectionMaskForTransform(): ByteArray? {
+        if (!selectionManager.hasSelection) return null
+        val mask = selectionManager.mask ?: return null
+        return mask.copyOf()
+    }
+
+    // ── 図形描画 ────────────────────────────────────────────────
+
+    fun drawShape(
+        layerId: Int, shapeType: String,
+        left: Int, top: Int, right: Int, bottom: Int,
+        color: Int, fill: Boolean, thickness: Float = 1f,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        when (shapeType) {
+            "line" -> ShapeRenderer.drawLine(layer.content, left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), color, thickness)
+            "rect" -> if (fill) ShapeRenderer.fillRect(layer.content, left, top, right, bottom, color)
+                      else ShapeRenderer.drawRect(layer.content, left, top, right, bottom, color, thickness)
+            "ellipse" -> if (fill) ShapeRenderer.fillEllipse(layer.content, left, top, right, bottom, color)
+                         else ShapeRenderer.drawEllipse(layer.content, left, top, right, bottom, color, thickness)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun floodFill(layerId: Int, x: Int, y: Int, color: Int, tolerance: Int = 0) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        ShapeRenderer.floodFill(layer.content, x, y, color, tolerance)
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun drawGradient(
+        layerId: Int, startX: Float, startY: Float, endX: Float, endY: Float,
+        startColor: Int, endColor: Int, type: ShapeRenderer.GradientType,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        ShapeRenderer.drawGradient(layer.content, startX, startY, endX, endY, startColor, endColor, type)
+        dirtyTracker.markFullRebuild()
+    }
+
+    // ── テキストレイヤー ────────────────────────────────────────
+
+    fun addTextLayer(config: TextRenderer.TextConfig): Layer = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = Layer(nextLayerId++, "テキスト: ${config.text.take(10)}", TiledSurface(width, height))
+        layer.textConfig = config
+        TextRenderer.renderText(layer.content, config)
+        _layers.add(layer)
+        activeLayerId = layer.id
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[addTextLayer] id=${layer.id} text='${config.text.take(20)}'" }
+        layer
+    }
+
+    fun updateTextLayer(layerId: Int, config: TextRenderer.TextConfig) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        layer.textConfig = config
+        layer.content.clear()
+        TextRenderer.renderText(layer.content, config)
+        dirtyTracker.markFullRebuild()
+    }
+
+    // ── 追加フィルター ──────────────────────────────────────────
+
+    fun applyToneCurve(
+        layerId: Int,
+        masterCurve: IntArray? = null,
+        redCurve: IntArray? = null,
+        greenCurve: IntArray? = null,
+        blueCurve: IntArray? = null,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyToneCurve(pixels, masterCurve, redCurve, greenCurve, blueCurve)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyLevels(
+        layerId: Int, inBlack: Int = 0, inWhite: Int = 255,
+        gamma: Float = 1f, outBlack: Int = 0, outWhite: Int = 255,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyLevels(pixels, inBlack, inWhite, gamma, outBlack, outWhite)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyColorBalance(layerId: Int, cyanRed: Int, magentaGreen: Int, yellowBlue: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyColorBalance(pixels, cyanRed, magentaGreen, yellowBlue)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyUnsharpMask(layerId: Int, radius: Int = 1, amount: Float = 1f, threshold: Int = 0) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyUnsharpMask(pixels, width, height, radius, amount, threshold)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyMosaic(layerId: Int, blockSize: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyMosaic(pixels, width, height, blockSize)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyNoise(layerId: Int, amount: Int, monochrome: Boolean = true) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyNoise(pixels, amount, monochrome)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyPosterize(layerId: Int, levels: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyPosterize(pixels, levels)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyThreshold(layerId: Int, threshold: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyThreshold(pixels, threshold)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyGradientMap(layerId: Int, gradientLut: IntArray) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyGradientMap(pixels, gradientLut)
+        }
+        dirtyTracker.markFullRebuild()
     }
 }

@@ -48,6 +48,32 @@ object Shaders {
         }
     """
 
+    /** 選択範囲オーバーレイ (マーチングアンツ) */
+    const val SEL_OVERLAY_FRAG = """
+        precision mediump float;
+        uniform sampler2D uSelMask;
+        uniform float uTime;
+        uniform vec2 uTexelSize;
+        varying vec2 vUV;
+        void main() {
+            float mask = texture2D(uSelMask, vUV).a;
+            float maskL = texture2D(uSelMask, vUV + vec2(-uTexelSize.x, 0.0)).a;
+            float maskR = texture2D(uSelMask, vUV + vec2( uTexelSize.x, 0.0)).a;
+            float maskU = texture2D(uSelMask, vUV + vec2(0.0, -uTexelSize.y)).a;
+            float maskD = texture2D(uSelMask, vUV + vec2(0.0,  uTexelSize.y)).a;
+            float edge = abs(mask - maskL) + abs(mask - maskR) + abs(mask - maskU) + abs(mask - maskD);
+            if (edge > 0.1) {
+                float pos = gl_FragCoord.x + gl_FragCoord.y;
+                float pattern = step(0.5, fract((pos - uTime * 40.0) / 8.0));
+                gl_FragColor = vec4(pattern, pattern, pattern, 0.85);
+            } else if (mask < 0.01) {
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 0.25);
+            } else {
+                discard;
+            }
+        }
+    """
+
     /** チェッカーボード背景 (透明表示用) */
     const val CHECKER_FRAG = """
         precision mediump float;

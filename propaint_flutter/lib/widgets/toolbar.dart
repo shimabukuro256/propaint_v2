@@ -123,6 +123,40 @@ class PaintToolbar extends StatelessWidget {
             isActive: openPanel == PanelType.layer,
             tooltip: 'レイヤー',
           ),
+
+          _separator(),
+
+          // 選択ツール
+          _ToolbarIcon(
+            icon: Icons.select_all_rounded,
+            onPressed: () => onTogglePanel(PanelType.selection),
+            isActive: openPanel == PanelType.selection,
+            tooltip: '選択',
+          ),
+
+          // 図形・テキスト
+          _ToolbarIcon(
+            icon: Icons.shape_line_rounded,
+            onPressed: () => onTogglePanel(PanelType.shapeText),
+            isActive: openPanel == PanelType.shapeText,
+            tooltip: '図形・テキスト',
+          ),
+
+          // 変形
+          _ToolbarIcon(
+            icon: Icons.transform_rounded,
+            onPressed: () => onTogglePanel(PanelType.transform),
+            isActive: openPanel == PanelType.transform,
+            tooltip: '変形',
+          ),
+
+          // フィルター
+          _ToolbarIcon(
+            icon: Icons.auto_awesome_rounded,
+            onPressed: () => onTogglePanel(PanelType.filter),
+            isActive: openPanel == PanelType.filter,
+            tooltip: 'フィルター',
+          ),
         ],
       ),
     );

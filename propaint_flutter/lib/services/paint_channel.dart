@@ -181,6 +181,97 @@ class PaintChannel {
   Future<void> deactivateEyedropper() =>
       _method.invokeMethod('deactivateEyedropper');
 
+  Future<void> setToolMode(String mode) =>
+      _method.invokeMethod('setToolMode', {'mode': mode});
+
+  // ─── 選択ツール ───────────────────────────────────────
+
+  Future<void> selectRect(int left, int top, int right, int bottom) =>
+      _method.invokeMethod('selectRect', {'left': left, 'top': top, 'right': right, 'bottom': bottom});
+
+  Future<void> selectEllipse(int left, int top, int right, int bottom) =>
+      _method.invokeMethod('selectEllipse', {'left': left, 'top': top, 'right': right, 'bottom': bottom});
+
+  Future<void> selectByColor(int x, int y, {int tolerance = 32, bool contiguous = true}) =>
+      _method.invokeMethod('selectByColor', {'x': x, 'y': y, 'tolerance': tolerance, 'contiguous': contiguous});
+
+  Future<void> selectAll() => _method.invokeMethod('selectAll');
+  Future<void> clearSelection() => _method.invokeMethod('clearSelection');
+  Future<void> invertSelection() => _method.invokeMethod('invertSelection');
+
+  // ─── 変形ツール ───────────────────────────────────────
+
+  Future<void> flipLayerH() => _method.invokeMethod('flipLayerH');
+  Future<void> flipLayerV() => _method.invokeMethod('flipLayerV');
+  Future<void> rotateLayer90CW() => _method.invokeMethod('rotateLayer90CW');
+
+  Future<void> transformLayer({
+    double scaleX = 1, double scaleY = 1, double angle = 0,
+    double translateX = 0, double translateY = 0,
+  }) => _method.invokeMethod('transformLayer', {
+    'scaleX': scaleX, 'scaleY': scaleY, 'angle': angle,
+    'translateX': translateX, 'translateY': translateY,
+  });
+
+  // ─── レイヤーマスク ───────────────────────────────────
+
+  Future<void> addLayerMask({bool fillWhite = true}) =>
+      _method.invokeMethod('addLayerMask', {'fillWhite': fillWhite});
+
+  Future<void> removeLayerMask() => _method.invokeMethod('removeLayerMask');
+  Future<void> toggleMaskEnabled() => _method.invokeMethod('toggleMaskEnabled');
+  Future<void> toggleEditMask() => _method.invokeMethod('toggleEditMask');
+  Future<void> addMaskFromSelection() => _method.invokeMethod('addMaskFromSelection');
+
+  // ─── 図形・塗りつぶし ─────────────────────────────────
+
+  Future<void> drawShape(String type, int left, int top, int right, int bottom,
+      {bool fill = true, double thickness = 1}) =>
+      _method.invokeMethod('drawShape', {
+        'type': type, 'left': left, 'top': top, 'right': right, 'bottom': bottom,
+        'fill': fill, 'thickness': thickness,
+      });
+
+  Future<void> floodFill(int x, int y, {int tolerance = 0}) =>
+      _method.invokeMethod('floodFill', {'x': x, 'y': y, 'tolerance': tolerance});
+
+  // ─── テキストレイヤー ─────────────────────────────────
+
+  Future<void> addTextLayer(String text, {
+    double fontSize = 48, double x = 0, double y = 0,
+    bool bold = false, bool italic = false, bool vertical = false,
+  }) => _method.invokeMethod('addTextLayer', {
+    'text': text, 'fontSize': fontSize, 'x': x, 'y': y,
+    'bold': bold, 'italic': italic, 'vertical': vertical,
+  });
+
+  // ─── 追加フィルター ───────────────────────────────────
+
+  Future<void> applyUnsharpMask({int radius = 1, double amount = 1, int threshold = 0}) =>
+      _method.invokeMethod('applyUnsharpMask', {'radius': radius, 'amount': amount, 'threshold': threshold});
+
+  Future<void> applyMosaic(int blockSize) =>
+      _method.invokeMethod('applyMosaic', {'blockSize': blockSize});
+
+  Future<void> applyNoise(int amount, {bool monochrome = true}) =>
+      _method.invokeMethod('applyNoise', {'amount': amount, 'monochrome': monochrome});
+
+  Future<void> applyPosterize(int levels) =>
+      _method.invokeMethod('applyPosterize', {'levels': levels});
+
+  Future<void> applyThreshold(int threshold) =>
+      _method.invokeMethod('applyThreshold', {'threshold': threshold});
+
+  Future<void> applyLevels({int inBlack = 0, int inWhite = 255, double gamma = 1, int outBlack = 0, int outWhite = 255}) =>
+      _method.invokeMethod('applyLevels', {
+        'inBlack': inBlack, 'inWhite': inWhite, 'gamma': gamma, 'outBlack': outBlack, 'outWhite': outWhite,
+      });
+
+  Future<void> applyColorBalance({int cyanRed = 0, int magentaGreen = 0, int yellowBlue = 0}) =>
+      _method.invokeMethod('applyColorBalance', {
+        'cyanRed': cyanRed, 'magentaGreen': magentaGreen, 'yellowBlue': yellowBlue,
+      });
+
   // ─── ビュー操作 ───────────────────────────────────────
 
   Future<void> resetView() => _method.invokeMethod('resetView');
