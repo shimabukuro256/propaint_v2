@@ -1042,14 +1042,29 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val radius = max(1f, _brushSize.value / 2f)
         // 筆圧適用が有効な場合は デバイス筆圧を使用、無効な場合は 1.0 (100%)
         val usePressure = _pressureSelectionEnabled.value
+        val historySize = event.historySize
+        val hasHistory = historySize > 0
 
-        for (h in 0 until event.historySize) {
+        for (h in 0 until historySize) {
             val (dx, dy) = screenToDoc(event.getHistoricalX(h), event.getHistoricalY(h))
-            val pressure = if (usePressure) event.getHistoricalPressure(h).coerceIn(0f, 1f) else 1f
-            doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd, pressure)
+            val basePressure = if (usePressure) event.getHistoricalPressure(h).coerceIn(0.05f, 1f) else 1f
+            // 筆圧 0 の場合は最小値 0.05 を使用（デバイス未対応時）
+            val pressure = if (basePressure == 0f) 0.05f else basePressure
+            // 入り: 最初のストロークほど弱める、抜き: 最後のストロークほど弱める
+            val tapering = if (hasHistory) {
+                val ratio = h.toFloat() / historySize
+                // ハンニング窓でテーパー: 入りと抜きを自然に
+                val taper = (1f - kotlin.math.cos(ratio * Math.PI.toFloat())) / 2f
+                taper
+            } else {
+                1f
+            }
+            val taperedPressure = pressure * tapering
+            doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd, taperedPressure)
         }
         val (dx, dy) = screenToDoc(event.x, event.y)
-        val pressure = if (usePressure) event.pressure.coerceIn(0f, 1f) else 1f
+        val basePressure = if (usePressure) event.pressure.coerceIn(0.05f, 1f) else 1f
+        val pressure = if (basePressure == 0f) 0.05f else basePressure
         doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd, pressure)
     }
 

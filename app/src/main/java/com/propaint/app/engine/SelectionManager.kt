@@ -46,6 +46,8 @@ class SelectionManager(val width: Int, val height: Int) {
         val pressureRadius = radius * (minRadiusRatio + (1f - minRadiusRatio) * pressure)
         val r = max(1, pressureRadius.toInt())
         val r2 = r * r
+        val fadeStart2 = (r * 0.7f).let { it * it }  // 70%地点からグラデーション開始
+        val fadeRange = r2 - fadeStart2
         val startY = max(0, cy - r); val endY = min(height - 1, cy + r)
         val startX = max(0, cx - r); val endX = min(width - 1, cx + r)
 
@@ -57,16 +59,25 @@ class SelectionManager(val width: Int, val height: Int) {
             val dy = py - cy
             for (px in startX..endX) {
                 val dx = px - cx
-                if (dx * dx + dy * dy <= r2) {
+                val dist2 = dx * dx + dy * dy
+                if (dist2 <= r2) {
                     val idx = py * width + px
-                    if (isAdd) {
-                        // 選択追加: 完全不透明 (255) で上書き（既存値は保持）
-                        m[idx] = (strengthValue.toByte().toInt() and 0xFF).toByte()
+                    // 円形グラデーション: 70%地点からアルファをフェードアウト
+                    val gradientStrength = if (dist2 <= fadeStart2) {
+                        strengthValue
                     } else {
-                        // 選択削除: 筆圧強度分を直接減算（重ね描き時の指数減衰を防止）
+                        val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
+                        val tSq = t * t
+                        (strengthValue * (1f - tSq)).toInt()
+                    }
+
+                    if (isAdd) {
+                        // 選択追加: グラデーション強度で上書き
+                        m[idx] = (gradientStrength.toByte().toInt() and 0xFF).toByte()
+                    } else {
+                        // 選択削除: グラデーション強度で減算
                         val current = m[idx].toInt() and 0xFF
-                        val deleteStrength = (255f * pressure).toInt()
-                        val reduced = (current - deleteStrength).coerceAtLeast(0)
+                        val reduced = (current - gradientStrength).coerceAtLeast(0)
                         m[idx] = reduced.toByte()
                     }
                 }
