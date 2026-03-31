@@ -48,6 +48,42 @@ class _LayerPanelState extends State<LayerPanel> {
     _clearSelection();
   }
 
+  /// フォルダ作成ダイアログを表示
+  void _showCreateFolderDialog(BuildContext context) {
+    final nameController = TextEditingController(text: 'フォルダ');
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('新規フォルダ'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(hintText: 'フォルダ名'),
+          onSubmitted: (val) {
+            if (val.isNotEmpty) {
+              widget.channel.createLayerGroup(val);
+              Navigator.pop(context);
+            }
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () {
+              if (nameController.text.isNotEmpty) {
+                widget.channel.createLayerGroup(nameController.text);
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('作成'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final layers = widget.state.layers.reversed.toList(); // 上位レイヤーが先
@@ -86,6 +122,12 @@ class _LayerPanelState extends State<LayerPanel> {
                 ] else ...[
                   const Text('レイヤー', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
                   const Spacer(),
+                  _SmallIconButton(
+                    icon: Icons.folder_rounded,
+                    color: C.textSecondary,
+                    onTap: () => _showCreateFolderDialog(context),
+                    tooltip: 'フォルダ追加',
+                  ),
                   _SmallIconButton(
                     icon: Icons.add_rounded,
                     color: C.accent,

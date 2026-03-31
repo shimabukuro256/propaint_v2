@@ -1227,6 +1227,23 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _document?.translateLayerContent(id, dx, dy); updateUndoState()
     }
 
+    // ── レイヤーグループ ──────────────────────────────────────────────
+    fun createLayerGroup(name: String) {
+        _document?.createLayerGroup(name); updateLayerState()
+    }
+    fun deleteLayerGroup(groupId: Int) {
+        _document?.deleteLayerGroup(groupId); updateLayerState()
+    }
+    fun setLayerGroup(layerId: Int, groupId: Int) {
+        _document?.setLayerGroup(layerId, groupId); updateLayerState()
+    }
+    fun setGroupVisibility(groupId: Int, visible: Boolean) {
+        _document?.setGroupVisibility(groupId, visible); updateUndoState()
+    }
+    fun setGroupOpacity(groupId: Int, opacity: Float) {
+        _document?.setGroupOpacity(groupId, opacity); updateUndoState()
+    }
+
     // ── フィルター ──────────────────────────────────────────────────
 
     fun applyHslFilter(hue: Float, sat: Float, lit: Float) {

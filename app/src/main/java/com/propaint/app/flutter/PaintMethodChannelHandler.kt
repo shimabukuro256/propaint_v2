@@ -269,6 +269,31 @@ class PaintMethodChannelHandler(
                 launchHeavy(result) { viewModel.batchMergeLayers(ids) }
             }
 
+            // ── レイヤーグループ ──
+            "createLayerGroup" -> {
+                val name = call.argument<String>("name") ?: "フォルダ"
+                viewModel.createLayerGroup(name); result.success(null)
+            }
+            "deleteLayerGroup" -> {
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                viewModel.deleteLayerGroup(groupId); result.success(null)
+            }
+            "setLayerGroup" -> {
+                val layerId = call.argument<Int>("layerId") ?: return result.error("INVALID_ARG", "layerId is required", null)
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                viewModel.setLayerGroup(layerId, groupId); result.success(null)
+            }
+            "setGroupVisibility" -> {
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                val visible = call.argument<Boolean>("visible") ?: true
+                viewModel.setGroupVisibility(groupId, visible); result.success(null)
+            }
+            "setGroupOpacity" -> {
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                val opacity = call.argument<Double>("opacity")?.toFloat()?.coerceIn(0f, 1f) ?: 1f
+                viewModel.setGroupOpacity(groupId, opacity); result.success(null)
+            }
+
             // ── ツールモード ──
             "activateEyedropper" -> { viewModel.activateEyedropper(); result.success(null) }
             "deactivateEyedropper" -> { viewModel.deactivateEyedropper(); result.success(null) }

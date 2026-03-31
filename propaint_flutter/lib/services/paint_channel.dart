@@ -135,6 +135,23 @@ class PaintChannel {
   Future<void> batchMergeLayers(List<int> ids) =>
       _method.invokeMethod('batchMergeLayers', {'ids': ids});
 
+  // ─── レイヤーグループ（フォルダ）──────────────────
+
+  Future<void> createLayerGroup(String name) =>
+      _method.invokeMethod('createLayerGroup', {'name': name});
+
+  Future<void> deleteLayerGroup(int groupId) =>
+      _method.invokeMethod('deleteLayerGroup', {'groupId': groupId});
+
+  Future<void> setLayerGroup(int layerId, int groupId) =>
+      _method.invokeMethod('setLayerGroup', {'layerId': layerId, 'groupId': groupId});
+
+  Future<void> setGroupVisibility(int groupId, bool visible) =>
+      _method.invokeMethod('setGroupVisibility', {'groupId': groupId, 'visible': visible});
+
+  Future<void> setGroupOpacity(int groupId, double opacity) =>
+      _method.invokeMethod('setGroupOpacity', {'groupId': groupId, 'opacity': opacity});
+
   // ─── 保存/エクスポート ────────────────────────────────
 
   Future<void> saveProject() => _method.invokeMethod('saveProject');
