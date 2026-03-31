@@ -9,8 +9,9 @@ import 'panel_card.dart';
 class SelectionPanel extends StatelessWidget {
   final PaintState state;
   final PaintChannel channel;
+  final VoidCallback? onClose;
 
-  const SelectionPanel({super.key, required this.state, required this.channel});
+  const SelectionPanel({super.key, required this.state, required this.channel, this.onClose});
 
   @override
   Widget build(BuildContext context) {
@@ -39,25 +40,37 @@ class SelectionPanel extends StatelessWidget {
                   icon: Icons.crop_square_rounded,
                   label: '矩形',
                   isActive: toolMode == 'SelectRect',
-                  onTap: () => channel.setToolMode('SelectRect'),
+                  onTap: () {
+                    channel.setToolMode('SelectRect');
+                    onClose?.call();
+                  },
                 ),
                 _ToolChip(
                   icon: Icons.circle_outlined,
                   label: '楕円',
                   isActive: toolMode == 'SelectEllipse',
-                  onTap: () => channel.setToolMode('SelectEllipse'),
+                  onTap: () {
+                    channel.setToolMode('SelectEllipse');
+                    onClose?.call();
+                  },
                 ),
                 _ToolChip(
                   icon: Icons.gesture_rounded,
                   label: 'なげなわ',
                   isActive: toolMode == 'SelectLasso',
-                  onTap: () => channel.setToolMode('SelectLasso'),
+                  onTap: () {
+                    channel.setToolMode('SelectLasso');
+                    onClose?.call();
+                  },
                 ),
                 _ToolChip(
                   icon: Icons.auto_fix_high_rounded,
                   label: '自動選択',
                   isActive: toolMode == 'SelectMagicWand',
-                  onTap: () => channel.setToolMode('SelectMagicWand'),
+                  onTap: () {
+                    channel.setToolMode('SelectMagicWand');
+                    onClose?.call();
+                  },
                 ),
               ],
             ),
@@ -92,7 +105,10 @@ class SelectionPanel extends StatelessWidget {
               width: double.infinity,
               height: 32,
               child: OutlinedButton.icon(
-                onPressed: () => channel.setToolMode('Draw'),
+                onPressed: () {
+                  channel.setToolMode('Draw');
+                  onClose?.call();
+                },
                 icon: const Icon(Icons.edit_rounded, size: 16),
                 label: const Text('描画モードに戻る', style: TextStyle(fontSize: 12)),
                 style: OutlinedButton.styleFrom(

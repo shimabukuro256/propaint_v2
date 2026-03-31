@@ -219,7 +219,11 @@ class _PaintScaffoldState extends State<PaintScaffold> {
             Positioned(
               top: 60,
               left: 60,
-              child: SelectionPanel(state: _state, channel: _channel),
+              child: SelectionPanel(
+                state: _state,
+                channel: _channel,
+                onClose: _closePanel,
+              ),
             ),
 
           // 選択ペン・消しパネル
