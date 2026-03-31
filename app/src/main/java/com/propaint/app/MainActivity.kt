@@ -17,14 +17,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.flutter.PaintFlutterActivity
 import com.propaint.app.gallery.GalleryScreen
-import com.propaint.app.ui.screens.PaintScreen
 import com.propaint.app.ui.theme.ProPaintTheme
 import com.propaint.app.viewmodel.PaintViewModel
 
 class MainActivity : ComponentActivity() {
-
-    /** true にすると Flutter UI、false で従来の Compose UI を使用 */
-    private val useFlutterUi = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,30 +50,14 @@ class MainActivity : ComponentActivity() {
                         Screen.Gallery -> {
                             GalleryScreen(
                                 onOpenProject = { id ->
-                                    if (useFlutterUi) {
-                                        launchFlutterPaint(id)
-                                    } else {
-                                        viewModel.openProject(id)
-                                        screen = Screen.Paint
-                                    }
+                                    launchFlutterPaint(id)
                                 },
                                 onNewCanvas = { name, w, h ->
-                                    if (useFlutterUi) {
-                                        // 新規プロジェクトを作成し Flutter で開く
-                                        val projectId = viewModel.galleryRepo
-                                            .createProject(name, w, h)
-                                        launchFlutterPaint(projectId)
-                                    } else {
-                                        viewModel.openNewProject(name, w, h)
-                                        screen = Screen.Paint
-                                    }
+                                    // 新規プロジェクトを作成し Flutter で開く
+                                    val projectId = viewModel.galleryRepo
+                                        .createProject(name, w, h)
+                                    launchFlutterPaint(projectId)
                                 },
-                            )
-                        }
-                        Screen.Paint -> {
-                            PaintScreen(
-                                viewModel = viewModel,
-                                onBack = { screen = Screen.Gallery },
                             )
                         }
                     }
@@ -94,4 +74,4 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { Gallery, Paint }
+private enum class Screen { Gallery }
