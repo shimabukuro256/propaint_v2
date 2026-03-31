@@ -202,13 +202,12 @@ class PaintToolbar extends StatelessWidget {
 
     return brushDefs.map((def) {
       final (key, icon, tooltip) = def;
-      // 選択範囲ツール有効時はブラシアイコンを disabled にする
-      final isActive = !isSelectionToolActive && state.brushType == key;
+      final isActive = state.brushType == key && !isSelectionToolActive;
       return _BrushToolIcon(
         icon: icon,
         isActive: isActive,
         tooltip: tooltip,
-        onTap: isSelectionToolActive ? null : () => channel.setBrushType(key),
+        onTap: () => channel.setBrushType(key),
         onLongPress: isSelectionToolActive ? null : () {
           channel.setBrushType(key);
           onTogglePanel(PanelType.brush);
