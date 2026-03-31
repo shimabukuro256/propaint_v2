@@ -571,11 +571,11 @@ class BrushEngine(
         // ── Direct モード: content を直接ぼかし (リニアライト空間) ────
         if (drawTarget === sampleSource) {
             // 入力: sRGB → リニア変換
-            // 選択マスク有効時は選択範囲外のピクセルを選択範囲のエッジピクセルでリピートサンプリング
+            // 選択マスク有効時は選択範囲内のピクセルを最近エッジでサンプル
             for (ly in 0 until h) for (lx in 0 until w) {
                 val gx = x0 + lx; val gy = y0 + ly
                 var px = drawTarget.getPixelAt(gx, gy)
-                // 選択範囲のマスク値を確認。範囲外の場合はエッジピクセルをリピート
+                // 選択範囲のマスク値を確認。範囲外の場合は選択範囲内のエッジピクセルをサンプル
                 if (sm != null) {
                     val maskVal = sm.getMaskValue(gx, gy)
                     if (maskVal < 255) {
