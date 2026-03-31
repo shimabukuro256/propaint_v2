@@ -63,9 +63,10 @@ class SelectionManager(val width: Int, val height: Int) {
                         // 選択追加: 完全不透明 (255) で上書き（既存値は保持）
                         m[idx] = (strengthValue.toByte().toInt() and 0xFF).toByte()
                     } else {
-                        // 選択削除: 筆圧強度で減衰
+                        // 選択削除: 筆圧強度分を直接減算（重ね描き時の指数減衰を防止）
                         val current = m[idx].toInt() and 0xFF
-                        val reduced = (current * (1f - pressure)).toInt()
+                        val deleteStrength = (255f * pressure).toInt()
+                        val reduced = (current - deleteStrength).coerceAtLeast(0)
                         m[idx] = reduced.toByte()
                     }
                 }
