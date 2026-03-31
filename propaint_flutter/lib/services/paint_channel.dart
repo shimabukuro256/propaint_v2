@@ -199,6 +199,24 @@ class PaintChannel {
   Future<void> clearSelection() => _method.invokeMethod('clearSelection');
   Future<void> invertSelection() => _method.invokeMethod('invertSelection');
 
+  /// 選択ペン: 円形ブラシで選択範囲を追加
+  /// @param cx, cy: 中心座標
+  /// @param radius: ブラシ半径（ピクセル）
+  /// @param pressure: 筆圧 (0.0～1.0)
+  Future<void> paintSelectionAdd(int cx, int cy, int radius, {double pressure = 1.0}) =>
+      _method.invokeMethod('paintSelectionAdd', {
+        'cx': cx, 'cy': cy, 'radius': radius, 'pressure': pressure,
+      });
+
+  /// 選択消し: 円形ブラシで選択範囲を削除
+  /// @param cx, cy: 中心座標
+  /// @param radius: ブラシ半径（ピクセル）
+  /// @param pressure: 筆圧 (0.0～1.0)
+  Future<void> paintSelectionErase(int cx, int cy, int radius, {double pressure = 1.0}) =>
+      _method.invokeMethod('paintSelectionErase', {
+        'cx': cx, 'cy': cy, 'radius': radius, 'pressure': pressure,
+      });
+
   // ─── 変形ツール ───────────────────────────────────────
 
   Future<void> flipLayerH() => _method.invokeMethod('flipLayerH');

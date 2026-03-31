@@ -1456,6 +1456,22 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         pushSelMaskToRenderer()
     }
 
+    fun paintSelectionAdd(cx: Int, cy: Int, radius: Int, pressure: Float = 1f) {
+        val doc = _document ?: return
+        doc.selectionManager.ensureMask()
+        doc.selectionManager.paintCircle(cx, cy, radius, isAdd = true, pressure = pressure)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
+    fun paintSelectionErase(cx: Int, cy: Int, radius: Int, pressure: Float = 1f) {
+        val doc = _document ?: return
+        doc.selectionManager.ensureMask()
+        doc.selectionManager.paintCircle(cx, cy, radius, isAdd = false, pressure = pressure)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
     // ── 変形ツール ──────────────────────────────────────────────
 
     fun transformActiveLayer(scaleX: Float, scaleY: Float, angleDeg: Float, tx: Float, ty: Float) {

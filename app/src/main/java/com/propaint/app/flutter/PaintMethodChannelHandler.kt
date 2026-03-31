@@ -325,6 +325,20 @@ class PaintMethodChannelHandler(
             "selectAll" -> { viewModel.selectAll(); result.success(null) }
             "clearSelection" -> { viewModel.clearSelection(); result.success(null) }
             "invertSelection" -> { viewModel.invertSelection(); result.success(null) }
+            "paintSelectionAdd" -> {
+                val cx = call.argument<Int>("cx") ?: 0
+                val cy = call.argument<Int>("cy") ?: 0
+                val radius = call.argument<Int>("radius") ?: 10
+                val pressure = call.argument<Double>("pressure")?.toFloat() ?: 1f
+                viewModel.paintSelectionAdd(cx, cy, radius, pressure); result.success(null)
+            }
+            "paintSelectionErase" -> {
+                val cx = call.argument<Int>("cx") ?: 0
+                val cy = call.argument<Int>("cy") ?: 0
+                val radius = call.argument<Int>("radius") ?: 10
+                val pressure = call.argument<Double>("pressure")?.toFloat() ?: 1f
+                viewModel.paintSelectionErase(cx, cy, radius, pressure); result.success(null)
+            }
 
             // ── 変形 ──
             "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }

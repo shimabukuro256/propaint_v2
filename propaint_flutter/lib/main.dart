@@ -12,6 +12,7 @@ import 'widgets/color_picker_panel.dart';
 import 'widgets/layer_panel.dart';
 import 'widgets/side_quick_bar.dart';
 import 'widgets/selection_panel.dart';
+import 'widgets/selection_tool_panel.dart';
 import 'widgets/transform_panel.dart';
 import 'widgets/shape_text_panel.dart';
 import 'widgets/filter_panel.dart';
@@ -43,7 +44,7 @@ class ProPaintApp extends StatelessWidget {
 }
 
 /// 開いているパネル
-enum PanelType { none, brush, color, layer, menu, selection, transform, shapeText, filter }
+enum PanelType { none, brush, color, layer, menu, selection, selectionTool, transform, shapeText, filter }
 
 class PaintScaffold extends StatefulWidget {
   const PaintScaffold({super.key});
@@ -219,6 +220,18 @@ class _PaintScaffoldState extends State<PaintScaffold> {
               top: 60,
               left: 60,
               child: SelectionPanel(state: _state, channel: _channel),
+            ),
+
+          // 選択ペン・消しパネル
+          if (_openPanel == PanelType.selectionTool)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: SelectionToolPanel(
+                state: _state,
+                channel: _channel,
+                onClose: _closePanel,
+              ),
             ),
 
           // 変形パネル
