@@ -618,6 +618,8 @@ class BrushEngine(
                 }
 
                 val gpx = x0 + lx; val gpy = y0 + ly
+                // 選択範囲外のピクセルには書き込まない
+                if (sm != null && sm.getMaskValue(gpx, gpy) < 255) continue
                 val tx = drawTarget.pixelToTile(gpx)
                 val ty = drawTarget.pixelToTile(gpy)
                 if (tx < 0 || tx >= drawTarget.tilesX || ty < 0 || ty >= drawTarget.tilesY) continue
@@ -719,6 +721,10 @@ class BrushEngine(
             }
 
             val gpx = x0 + lx; val gpy = y0 + ly
+
+            // 選択範囲外のピクセルには書き込まない (Indirect mode でも同様)
+            if (sm != null && sm.getMaskValue(gpx, gpy) < 255) continue
+
             val contPx = sampleSource.getPixelAt(gpx, gpy)
             val subPx = PixelOps.unComposite(blendedComposite, contPx)
 
