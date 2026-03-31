@@ -194,15 +194,22 @@ class PaintToolbar extends StatelessWidget {
       ('Eraser', Icons.auto_fix_high_rounded, '消しゴム'),
     ];
 
+    // 選択範囲関連ツールが有効か判定
+    final isSelectionToolActive = const [
+      'SelectRect', 'SelectEllipse', 'SelectLasso', 'SelectMagicWand',
+      'SelectPen', 'SelectEraser'
+    ].contains(state.toolMode);
+
     return brushDefs.map((def) {
       final (key, icon, tooltip) = def;
-      final isActive = state.brushType == key;
+      // 選択範囲ツール有効時はブラシアイコンを disabled にする
+      final isActive = !isSelectionToolActive && state.brushType == key;
       return _BrushToolIcon(
         icon: icon,
         isActive: isActive,
         tooltip: tooltip,
-        onTap: () => channel.setBrushType(key),
-        onLongPress: () {
+        onTap: isSelectionToolActive ? null : () => channel.setBrushType(key),
+        onLongPress: isSelectionToolActive ? null : () {
           channel.setBrushType(key);
           onTogglePanel(PanelType.brush);
         },
@@ -223,21 +230,22 @@ class _BrushToolIcon extends StatelessWidget {
   final IconData icon;
   final bool isActive;
   final String tooltip;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   const _BrushToolIcon({
     required this.icon,
     required this.isActive,
     required this.tooltip,
-    required this.onTap,
-    required this.onLongPress,
+    this.onTap,
+    this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onTap != null;
     return Tooltip(
-      message: '$tooltip (長押しで設定)',
+      message: enabled ? '$tooltip (長押しで設定)' : '$tooltip (選択範囲ツール使用中)',
       waitDuration: const Duration(milliseconds: 500),
       child: Material(
         color: isActive ? C.accentDim : Colors.transparent,
@@ -252,7 +260,11 @@ class _BrushToolIcon extends StatelessWidget {
             child: Icon(
               icon,
               size: 18,
-              color: isActive ? C.accent : C.iconDefault,
+              color: isActive
+                  ? C.accent
+                  : enabled
+                      ? C.iconDefault
+                      : C.disabled,
             ),
           ),
         ),
