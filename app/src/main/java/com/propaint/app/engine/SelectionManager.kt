@@ -46,40 +46,17 @@ class SelectionManager(val width: Int, val height: Int) {
         val pressureRadius = radius * (minRadiusRatio + (1f - minRadiusRatio) * pressure)
         val r = max(1, pressureRadius.toInt())
         val r2 = r * r
-        val fadeStart2 = (r * 0.7f).let { it * it }  // 70%地点からグラデーション開始
-        val fadeRange = r2 - fadeStart2
         val startY = max(0, cy - r); val endY = min(height - 1, cy + r)
         val startX = max(0, cx - r); val endX = min(width - 1, cx + r)
-
-        // 筆圧に応じたマスク強度（0～255）
-        // 選択追加時は 筆圧関係なく 255 (完全不透明) で上書き (重ね描き時の選択抜けを防止)
-        val strengthValue = if (isAdd) 255 else (pressure * 255f).toInt().coerceIn(0, 255)
 
         for (py in startY..endY) {
             val dy = py - cy
             for (px in startX..endX) {
                 val dx = px - cx
-                val dist2 = dx * dx + dy * dy
-                if (dist2 <= r2) {
+                if (dx * dx + dy * dy <= r2) {
                     val idx = py * width + px
-                    // 円形グラデーション: 70%地点からアルファをフェードアウト
-                    val gradientStrength = if (dist2 <= fadeStart2) {
-                        strengthValue
-                    } else {
-                        val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
-                        val tSq = t * t
-                        (strengthValue * (1f - tSq)).toInt()
-                    }
-
-                    if (isAdd) {
-                        // 選択追加: グラデーション強度で上書き
-                        m[idx] = (gradientStrength.toByte().toInt() and 0xFF).toByte()
-                    } else {
-                        // 選択削除: グラデーション強度で減算
-                        val current = m[idx].toInt() and 0xFF
-                        val reduced = (current - gradientStrength).coerceAtLeast(0)
-                        m[idx] = reduced.toByte()
-                    }
+                    // 二値ペン: 選択追加は 255、選択削除は 0
+                    m[idx] = if (isAdd) 255.toByte() else 0.toByte()
                 }
             }
         }
