@@ -30,6 +30,8 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   void initState() {
     super.initState();
     _brushSize = widget.state.brushSize.toInt();
+    // パネル開時に選択ペンツールに切り替え
+    widget.channel.setToolMode('SelectPen');
   }
 
   @override
@@ -76,7 +78,11 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
                   style: TextStyle(fontWeight: FontWeight.bold)),
               IconButton(
                 icon: const Icon(Icons.close, size: 18),
-                onPressed: widget.onClose,
+                onPressed: () {
+                  // パネル閉時に描画モードに戻す
+                  widget.channel.setToolMode('Draw');
+                  widget.onClose();
+                },
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
               ),
