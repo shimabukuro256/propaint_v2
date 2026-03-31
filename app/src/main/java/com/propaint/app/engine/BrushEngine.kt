@@ -943,7 +943,8 @@ data class BrushConfig(
     val pressureSizeIntensity: Int = 100,
     val pressureOpacityIntensity: Int = 100,
     val pressureDensityIntensity: Int = 100,
-    val minSizeRatio: Float = 0.2f,
+    /** 最小ブラシサイズ (1～100 パーセント、デフォルト 20%) */
+    val minBrushSizePercent: Int = 20,
     // ── テーパー ──
     val taperEnabled: Boolean = true,
     // ── 水彩 ──

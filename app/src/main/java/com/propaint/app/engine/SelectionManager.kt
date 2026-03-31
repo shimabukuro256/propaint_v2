@@ -38,18 +38,36 @@ class SelectionManager(val width: Int, val height: Int) {
     }
 
     /** 円形ブラシで選択マスクをペイントする */
-    fun paintCircle(cx: Int, cy: Int, radius: Int, isAdd: Boolean) {
+    fun paintCircle(cx: Int, cy: Int, radius: Int, isAdd: Boolean, pressure: Float = 1f) {
         val m = _mask ?: return
-        val r = max(1, radius)
+        require(pressure in 0f..1f) { "pressure must be in 0.0..1.0, got $pressure" }
+        // 筆圧が低い場合は最小径を適用（デフォルト 20%）
+        val minRadiusRatio = 0.2f
+        val pressureRadius = radius * (minRadiusRatio + (1f - minRadiusRatio) * pressure)
+        val r = max(1, pressureRadius.toInt())
         val r2 = r * r
         val startY = max(0, cy - r); val endY = min(height - 1, cy + r)
         val startX = max(0, cx - r); val endX = min(width - 1, cx + r)
+
+        // 筆圧に応じたマスク強度（0～255）
+        val pressureStrength = (pressure * 255f).toInt().coerceIn(0, 255).toByte()
+
         for (py in startY..endY) {
             val dy = py - cy
             for (px in startX..endX) {
                 val dx = px - cx
                 if (dx * dx + dy * dy <= r2) {
-                    m[py * width + px] = if (isAdd) 0xFF.toByte() else 0
+                    val idx = py * width + px
+                    if (isAdd) {
+                        // 選択追加: 筆圧強度を適用
+                        val current = m[idx].toInt() and 0xFF
+                        m[idx] = maxOf(current, (pressureStrength.toInt() and 0xFF)).toByte()
+                    } else {
+                        // 選択削除: 筆圧強度で減衰
+                        val current = m[idx].toInt() and 0xFF
+                        val reduced = (current * (1f - pressure)).toInt()
+                        m[idx] = reduced.toByte()
+                    }
                 }
             }
         }
