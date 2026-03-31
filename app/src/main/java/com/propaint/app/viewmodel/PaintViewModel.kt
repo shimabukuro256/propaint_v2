@@ -1040,12 +1040,17 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     /** 選択ペン/消しペン: ブラシサイズの円で選択マスクをペイント */
     private fun paintSelectionMask(event: MotionEvent, doc: CanvasDocument, isAdd: Boolean) {
         val radius = max(1f, _brushSize.value / 2f)
+        // 筆圧適用が有効な場合は デバイス筆圧を使用、無効な場合は 1.0 (100%)
+        val usePressure = _pressureSelectionEnabled.value
+
         for (h in 0 until event.historySize) {
             val (dx, dy) = screenToDoc(event.getHistoricalX(h), event.getHistoricalY(h))
-            doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd)
+            val pressure = if (usePressure) event.getHistoricalPressure(h).coerceIn(0f, 1f) else 1f
+            doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd, pressure)
         }
         val (dx, dy) = screenToDoc(event.x, event.y)
-        doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd)
+        val pressure = if (usePressure) event.pressure.coerceIn(0f, 1f) else 1f
+        doc.selectionManager.paintCircle(dx.toInt(), dy.toInt(), radius.toInt(), isAdd, pressure)
     }
 
     private fun handleMultiTouch(event: MotionEvent) {
