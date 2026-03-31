@@ -527,10 +527,21 @@ class BrushEngine(
     ) {
         // 大ブラシ時のメモリ/CPU 負荷を制限: デバイス RAM に応じた上限
         val safeRadius = radius.coerceIn(1, MemoryConfig.maxBlurRadius)
-        val x0 = maxOf(0, cx - safeRadius)
-        val y0 = maxOf(0, cy - safeRadius)
-        val x1 = minOf(drawTarget.width - 1, cx + safeRadius)
-        val y1 = minOf(drawTarget.height - 1, cy + safeRadius)
+        var x0 = maxOf(0, cx - safeRadius)
+        var y0 = maxOf(0, cy - safeRadius)
+        var x1 = minOf(drawTarget.width - 1, cx + safeRadius)
+        var y1 = minOf(drawTarget.height - 1, cy + safeRadius)
+
+        // 選択範囲がある場合: ぼかし領域をバウンディングボックス内に制限
+        // （サンプリング時に絶対に範囲外参照しない）
+        val sm = selectionManager
+        val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
+        if (selBounds != null) {
+            x0 = maxOf(x0, selBounds[0])
+            y0 = maxOf(y0, selBounds[1])
+            x1 = minOf(x1, selBounds[2] - 1)
+            y1 = minOf(y1, selBounds[3] - 1)
+        }
         if (x0 > x1 || y0 > y1) return
 
         val w = x1 - x0 + 1
@@ -547,18 +558,27 @@ class BrushEngine(
 
         val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
         val kr = maxOf(1, safeRadius / 3)
-        val sm = selectionManager
 
         // ── Direct モード: content を直接ぼかし (リニアライト空間) ────
         if (drawTarget === sampleSource) {
             // 入力: sRGB → リニア変換
-            // 選択マスク有効時は選択範囲外のピクセルを透明にしてから入力
+            // 選択マスク有効時は選択範囲外のピクセルを選択範囲のエッジピクセルでリピートサンプリング
             for (ly in 0 until h) for (lx in 0 until w) {
                 val gx = x0 + lx; val gy = y0 + ly
                 var px = drawTarget.getPixelAt(gx, gy)
-                // 選択範囲外のピクセルは透明に置き換え（ぼかし計算に影響させない）
-                if (sm != null && sm.getMaskValue(gx, gy) < 255) {
-                    px = 0
+                // 選択範囲のマスク値を確認。範囲外の場合はエッジピクセルをリピート
+                if (sm != null) {
+                    val maskVal = sm.getMaskValue(gx, gy)
+                    if (maskVal < 255) {
+                        // 範囲外: 選択範囲内の最近エッジピクセルをサンプル
+                        if (selBounds != null) {
+                            val edgeX = gx.coerceIn(selBounds[0], selBounds[2] - 1)
+                            val edgeY = gy.coerceIn(selBounds[1], selBounds[3] - 1)
+                            px = drawTarget.getPixelAt(edgeX, edgeY)
+                        } else {
+                            px = 0
+                        }
+                    }
                 }
                 blurSrc[ly * w + lx] = px
                 blurLinSrc[ly * w + lx] = PixelOps.pixelToLinear64(px)
@@ -623,10 +643,21 @@ class BrushEngine(
             var contPx = sampleSource.getPixelAt(px, py)
             val idx = ly * w + lx
 
-            // 選択マスク有効時は選択範囲外のピクセルを透明に置き換え
-            if (sm != null && sm.getMaskValue(px, py) < 255) {
-                subPx = 0
-                contPx = 0
+            // 選択マスク有効時は選択範囲外のピクセルを選択範囲のエッジピクセルでリピートサンプリング
+            if (sm != null) {
+                val maskVal = sm.getMaskValue(px, py)
+                if (maskVal < 255) {
+                    // 範囲外: 選択範囲内の最近エッジピクセルをサンプル
+                    if (selBounds != null) {
+                        val edgeX = px.coerceIn(selBounds[0], selBounds[2] - 1)
+                        val edgeY = py.coerceIn(selBounds[1], selBounds[3] - 1)
+                        subPx = drawTarget.getPixelAt(edgeX, edgeY)
+                        contPx = sampleSource.getPixelAt(edgeX, edgeY)
+                    } else {
+                        subPx = 0
+                        contPx = 0
+                    }
+                }
             }
 
             val comp = PixelOps.blendSrcOver(contPx, subPx)
