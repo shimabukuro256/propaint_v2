@@ -207,7 +207,13 @@ class PaintToolbar extends StatelessWidget {
         icon: icon,
         isActive: isActive,
         tooltip: tooltip,
-        onTap: () => channel.setBrushType(key),
+        onTap: () {
+          channel.setBrushType(key);
+          // 選択範囲ツール active 時は Draw に切り替える（選択範囲は保持）
+          if (isSelectionToolActive) {
+            channel.setToolMode('Draw');
+          }
+        },
         onLongPress: isSelectionToolActive ? null : () {
           channel.setBrushType(key);
           onTogglePanel(PanelType.brush);
