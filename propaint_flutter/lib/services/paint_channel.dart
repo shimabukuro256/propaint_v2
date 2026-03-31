@@ -82,6 +82,9 @@ class PaintChannel {
   Future<void> togglePressureDensity() =>
       _method.invokeMethod('togglePressureDensity');
 
+  Future<void> togglePressureSelection() =>
+      _method.invokeMethod('togglePressureSelection');
+
   // ─── カラー ───────────────────────────────────────────
 
   /// ARGB int (例: 0xFF000000 = 黒)

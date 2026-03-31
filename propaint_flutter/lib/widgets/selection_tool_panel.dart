@@ -25,6 +25,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   late int _brushSize = widget.state.brushSize.toInt();
   late double _pressure = 1.0;
   bool _isAdding = true; // true: 選択ペン (追加), false: 選択消し (削除)
+  bool _pressureEnabled = false; // 筆圧適用オンオフ
 
   @override
   void initState() {
@@ -49,10 +50,13 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
     const cx = 512;
     const cy = 512;
 
+    // 筆圧適用が有効な場合のみ _pressure を使用、無効な場合は 1.0 (100%)
+    final effectivePressure = _pressureEnabled ? _pressure : 1.0;
+
     if (_isAdding) {
-      widget.channel.paintSelectionAdd(cx, cy, _brushSize, pressure: _pressure);
+      widget.channel.paintSelectionAdd(cx, cy, _brushSize, pressure: effectivePressure);
     } else {
-      widget.channel.paintSelectionErase(cx, cy, _brushSize, pressure: _pressure);
+      widget.channel.paintSelectionErase(cx, cy, _brushSize, pressure: effectivePressure);
     }
   }
 
@@ -102,6 +106,8 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
                   selected: {_isAdding},
                   onSelectionChanged: (val) {
                     setState(() => _isAdding = val.first);
+                    // ツールモードを切り替え
+                    widget.channel.setToolMode(_isAdding ? 'SelectPen' : 'SelectEraser');
                   },
                 ),
               ),
@@ -133,28 +139,45 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
           ),
           const SizedBox(height: 8),
 
-          // ──────────────────── 筆圧 ────────────────────
+          // ──────────────────── 筆圧適用オンオフ ────────────────────
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('筆圧:', style: TextStyle(fontSize: 12)),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Slider(
-                  value: _pressure,
-                  min: 0.0,
-                  max: 1.0,
-                  onChanged: (val) {
-                    setState(() => _pressure = val);
-                  },
-                ),
-              ),
-              SizedBox(
-                width: 40,
-                child: Text('${(_pressure * 100).toInt()}%',
-                    textAlign: TextAlign.right, style: const TextStyle(fontSize: 12)),
+              const Text('筆圧適用:', style: TextStyle(fontSize: 12)),
+              Switch(
+                value: _pressureEnabled,
+                onChanged: (val) {
+                  setState(() => _pressureEnabled = val);
+                  widget.channel.togglePressureSelection();
+                },
               ),
             ],
           ),
+          const SizedBox(height: 8),
+
+          // ──────────────────── 筆圧値スライダー ────────────────────
+          if (_pressureEnabled)
+            Row(
+              children: [
+                const Text('筆圧:', style: TextStyle(fontSize: 12)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Slider(
+                    value: _pressure,
+                    min: 0.0,
+                    max: 1.0,
+                    onChanged: (val) {
+                      setState(() => _pressure = val);
+                    },
+                  ),
+                ),
+                SizedBox(
+                  width: 40,
+                  child: Text('${(_pressure * 100).toInt()}%',
+                      textAlign: TextAlign.right, style: const TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
           const SizedBox(height: 12),
 
           // ──────────────────── テスト描画ボタン ────────────────────

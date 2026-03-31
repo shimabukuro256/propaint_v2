@@ -157,6 +157,7 @@ class PaintMethodChannelHandler(
             "togglePressureSize" -> { viewModel.togglePressureSize(); result.success(null) }
             "togglePressureOpacity" -> { viewModel.togglePressureOpacity(); result.success(null) }
             "togglePressureDensity" -> { viewModel.togglePressureDensity(); result.success(null) }
+            "togglePressureSelection" -> { viewModel.togglePressureSelection(); result.success(null) }
 
             // ── カラー ──
             "setColor" -> {

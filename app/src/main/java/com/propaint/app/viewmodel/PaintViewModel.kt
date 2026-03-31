@@ -131,6 +131,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     val pressureOpacityEnabled: StateFlow<Boolean> = _pressureOpacityEnabled.asStateFlow()
     private val _pressureDensityEnabled = MutableStateFlow(false)
     val pressureDensityEnabled: StateFlow<Boolean> = _pressureDensityEnabled.asStateFlow()
+    private val _pressureSelectionEnabled = MutableStateFlow(false)
+    val pressureSelectionEnabled: StateFlow<Boolean> = _pressureSelectionEnabled.asStateFlow()
 
     private val _currentColor = MutableStateFlow(Color.Black)
     val currentColor: StateFlow<Color> = _currentColor.asStateFlow()
@@ -538,6 +540,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun togglePressureSize() { _pressureSizeEnabled.value = !_pressureSizeEnabled.value; persistCurrentBrush(); refreshCursorSize() }
     fun togglePressureOpacity() { _pressureOpacityEnabled.value = !_pressureOpacityEnabled.value; persistCurrentBrush() }
     fun togglePressureDensity() { _pressureDensityEnabled.value = !_pressureDensityEnabled.value; persistCurrentBrush() }
+    fun togglePressureSelection() { _pressureSelectionEnabled.value = !_pressureSelectionEnabled.value; persistCurrentBrush() }
     /** 現在の描画色を変更する (履歴には追加しない。ドラッグ中等のリアルタイム更新用) */
     fun setColor(color: Color) {
         _currentColor.value = color
