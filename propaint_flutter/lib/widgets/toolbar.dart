@@ -129,9 +129,23 @@ class PaintToolbar extends StatelessWidget {
           // 選択ペン
           _ToolbarIcon(
             icon: Icons.edit_rounded,
-            onPressed: () => onTogglePanel(PanelType.selectionTool),
-            isActive: openPanel == PanelType.selectionTool,
-            tooltip: '選択ペン・消し',
+            onPressed: () {
+              channel.setToolMode('SelectPen');
+              onTogglePanel(PanelType.selectionTool);
+            },
+            isActive: state.toolMode == 'SelectPen' || openPanel == PanelType.selectionTool,
+            tooltip: '選択ペン',
+          ),
+
+          // 選択消しペン
+          _ToolbarIcon(
+            icon: Icons.cleaning_services_rounded,
+            onPressed: () {
+              channel.setToolMode('SelectEraser');
+              onTogglePanel(PanelType.selectionTool);
+            },
+            isActive: state.toolMode == 'SelectEraser',
+            tooltip: '選択消しペン',
           ),
 
           // 選択ツール（メニュー）
