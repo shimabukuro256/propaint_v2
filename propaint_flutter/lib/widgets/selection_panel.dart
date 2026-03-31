@@ -59,18 +59,6 @@ class SelectionPanel extends StatelessWidget {
                   isActive: toolMode == 'SelectMagicWand',
                   onTap: () => channel.setToolMode('SelectMagicWand'),
                 ),
-                _ToolChip(
-                  icon: Icons.brush_rounded,
-                  label: '選択ペン',
-                  isActive: toolMode == 'SelectPen',
-                  onTap: () => channel.setToolMode('SelectPen'),
-                ),
-                _ToolChip(
-                  icon: Icons.cleaning_services_rounded,
-                  label: '選択消し',
-                  isActive: toolMode == 'SelectEraser',
-                  onTap: () => channel.setToolMode('SelectEraser'),
-                ),
               ],
             ),
           ),
