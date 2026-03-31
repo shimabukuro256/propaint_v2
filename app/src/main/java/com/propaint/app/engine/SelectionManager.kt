@@ -50,7 +50,8 @@ class SelectionManager(val width: Int, val height: Int) {
         val startX = max(0, cx - r); val endX = min(width - 1, cx + r)
 
         // 筆圧に応じたマスク強度（0～255）
-        val pressureStrength = (pressure * 255f).toInt().coerceIn(0, 255).toByte()
+        // 選択追加時は 筆圧関係なく 255 (完全不透明) で上書き (重ね描き時の選択抜けを防止)
+        val strengthValue = if (isAdd) 255 else (pressure * 255f).toInt().coerceIn(0, 255)
 
         for (py in startY..endY) {
             val dy = py - cy
@@ -59,9 +60,8 @@ class SelectionManager(val width: Int, val height: Int) {
                 if (dx * dx + dy * dy <= r2) {
                     val idx = py * width + px
                     if (isAdd) {
-                        // 選択追加: 筆圧強度を適用
-                        val current = m[idx].toInt() and 0xFF
-                        m[idx] = maxOf(current, (pressureStrength.toInt() and 0xFF)).toByte()
+                        // 選択追加: 完全不透明 (255) で上書き（既存値は保持）
+                        m[idx] = (strengthValue.toByte().toInt() and 0xFF).toByte()
                     } else {
                         // 選択削除: 筆圧強度で減衰
                         val current = m[idx].toInt() and 0xFF
