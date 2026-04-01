@@ -548,22 +548,45 @@ class BrushEngine(
         val h = y1 - y0 + 1
         val size = w * h
 
-        // メモリ上限チェック: 複数の大型バッファ（blurSrc, blurLinSrc/Dst/Tmp, blurDst等）を使用
-        // デバイスメモリ制限を考慮した厳密な上限
-        val maxSize = 2000000  // 約 2MP（安全マージン確保）
+        // メモリ上限チェック: 複数の大型バッファを考慮した合計メモリを計算
+        // Direct モード: IntArray*3 (4B) + LongArray*3 (8B) = 36B/pixel
+        // Indirect モード: 上記*2 + 追加 IntArray*3 + LongArray*3 = 72B/pixel
+        //
+        // MemoryConfig.maxBlurRadius に基づいて最大フィルタサイズを決定
+        // safeRadius = radius.coerceIn(1, MemoryConfig.maxBlurRadius)
+        // 最大領域サイズ: (safeRadius*2+1)^2 pixels
+        val maxRadiusSq = (MemoryConfig.maxBlurRadius * 2 + 1)
+        val maxAreaSizeDirect = maxRadiusSq * maxRadiusSq
+
+        // Indirect モードの場合はより厳しい制限を適用
+        val maxSize = if (drawTarget !== sampleSource) {
+            // Indirect モード: メモリ使用量が最大になる
+            (maxAreaSizeDirect * 0.8).toInt()  // 20% 安全マージン
+        } else {
+            // Direct モード
+            maxAreaSizeDirect
+        }
+
         if (size > maxSize) {
             PaintDebug.d(PaintDebug.Perf) {
-                "[blurArea] skipped: size=$size > maxSize=$maxSize (w=$w h=$h)"
+                "[blurArea] skipped: size=$size > maxSize=$maxSize (w=$w h=$h) mode=${if(drawTarget === sampleSource) "Direct" else "Indirect"}"
             }
             return
         }
 
-        // バッファ再利用 (GC 回避)
-        if (blurSrc.size < size) {
-            blurSrc = IntArray(size); blurTmp = IntArray(size); blurDst = IntArray(size)
-        }
-        if (blurLinSrc.size < size) {
-            blurLinSrc = LongArray(size); blurLinTmp = LongArray(size); blurLinDst = LongArray(size)
+        // バッファ再利用 (GC 回避) - メモリ不足時はスキップ
+        try {
+            if (blurSrc.size < size) {
+                blurSrc = IntArray(size); blurTmp = IntArray(size); blurDst = IntArray(size)
+            }
+            if (blurLinSrc.size < size) {
+                blurLinSrc = LongArray(size); blurLinTmp = LongArray(size); blurLinDst = LongArray(size)
+            }
+        } catch (e: OutOfMemoryError) {
+            PaintDebug.d(PaintDebug.Perf) {
+                "[blurArea] OOM: failed to allocate buffers for size=$size (w=$w h=$h)"
+            }
+            return
         }
 
         val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
@@ -635,11 +658,18 @@ class BrushEngine(
 
         // ── Indirect モード: sublayer + content 合成ぼかし (リニアライト空間) ──
         // (Airbrush 等 indirect=true のブラシ用。筆/水彩は上の Direct パスを使用)
-        if (blurSubSrc.size < size) {
-            blurSubSrc = IntArray(size); blurSubDst = IntArray(size); blurSubTmp = IntArray(size)
-        }
-        if (blurLinSubSrc.size < size) {
-            blurLinSubSrc = LongArray(size); blurLinSubDst = LongArray(size); blurLinSubTmp = LongArray(size)
+        try {
+            if (blurSubSrc.size < size) {
+                blurSubSrc = IntArray(size); blurSubDst = IntArray(size); blurSubTmp = IntArray(size)
+            }
+            if (blurLinSubSrc.size < size) {
+                blurLinSubSrc = LongArray(size); blurLinSubDst = LongArray(size); blurLinSubTmp = LongArray(size)
+            }
+        } catch (e: OutOfMemoryError) {
+            PaintDebug.d(PaintDebug.Perf) {
+                "[blurArea] OOM in Indirect mode: failed to allocate sub-buffers for size=$size (w=$w h=$h)"
+            }
+            return
         }
 
         for (ly in 0 until h) for (lx in 0 until w) {
