@@ -39,6 +39,7 @@ class SelectionManager(val width: Int, val height: Int) {
 
     /** 円形ブラシで選択マスクをペイントする */
     fun paintCircle(cx: Int, cy: Int, radius: Int, isAdd: Boolean, pressure: Float = 1f) {
+        ensureMask()
         val m = _mask ?: return
         require(pressure in 0f..1f) { "pressure must be in 0.0..1.0, got $pressure" }
         // 筆圧が低い場合は最小径を適用（デフォルト 20%）
@@ -80,7 +81,7 @@ class SelectionManager(val width: Int, val height: Int) {
 
     /** 矩形選択 */
     fun selectRect(left: Int, top: Int, right: Int, bottom: Int, mode: SelectionMode = SelectionMode.Replace) {
-        require(left <= right && top <= bottom) { "invalid rect: ($left,$top)-($right,$bottom)" }
+        require(left < right && top < bottom) { "invalid rect: ($left,$top)-($right,$bottom)" }
         val l = max(0, left); val t = max(0, top)
         val r = min(width, right); val b = min(height, bottom)
         if (l >= r || t >= b) {
@@ -162,7 +163,7 @@ class SelectionManager(val width: Int, val height: Int) {
                 if (y0 == y1) continue
                 val y0f = y0.toFloat(); val y1f = y1.toFloat()
                 // yf がこの辺の y 範囲内にあるか
-                if ((yf < min(y0f, y1f)) || (yf >= max(y0f, y1f))) continue
+                if ((yf < min(y0f, y1f)) || (yf > max(y0f, y1f))) continue
                 val t = (yf - y0f) / (y1f - y0f)
                 intersections.add(x0 + t * (x1 - x0))
             }
