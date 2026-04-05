@@ -57,7 +57,8 @@ class _LayerPanelState extends State<LayerPanel> {
     for (final id in _selectedIds.toList()) {
       final layer = widget.state.layers.firstWhere((l) => l.id == id, orElse: () => LayerInfo(id: 0, name: ''));
       if (layer.isGroup) {
-        widget.channel.deleteLayerGroup(id);
+        // フォルダは負のIDで表現されているため、正のIDに変換して削除
+        widget.channel.deleteLayerGroup(-id);
       } else {
         widget.channel.removeLayer(id);
       }
@@ -214,7 +215,10 @@ class _LayerPanelState extends State<LayerPanel> {
                     if (hasSelection) {
                       _toggleSelection(layer.id);
                     } else {
-                      widget.channel.selectLayer(layer.id);
+                      // フォルダの場合は選択しない（展開/折畳のみ）
+                      if (!layer.isGroup) {
+                        widget.channel.selectLayer(layer.id);
+                      }
                     }
                   },
                   onToggleExpand: () {
@@ -365,7 +369,8 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                           color: C.error,
                           onTap: () {
                             if (widget.layer.isGroup) {
-                              widget.channel.deleteLayerGroup(widget.layer.id);
+                              // フォルダは負のIDで表現されているため、正のIDに変換して削除
+                              widget.channel.deleteLayerGroup(-widget.layer.id);
                             } else {
                               widget.channel.removeLayer(widget.layer.id);
                             }
@@ -634,7 +639,8 @@ class _LayerItem extends StatelessWidget {
                         if (groupId == 0) {
                           onMoveToGroup(layer.id, 0);
                         } else {
-                          onMoveToGroup(layer.id, groupId);
+                          // フォルダは負のIDで表現されているため、正のIDに変換
+                          onMoveToGroup(layer.id, -groupId);
                         }
                       },
                       child: Icon(
