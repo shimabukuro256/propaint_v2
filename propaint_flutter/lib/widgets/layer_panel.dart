@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 
 import '../models/paint_state.dart';
 import '../services/paint_channel.dart';
@@ -19,8 +20,19 @@ class _LayerPanelState extends State<LayerPanel> {
   int? _expandedLayerId;
   final Set<int> _selectedIds = {};
   final Set<int> _expandedGroupIds = {};
-  int? _draggedLayerId;
-  int? _dragOverGroupId;  // ドラッグオーバー中のグループID
+
+  // ドラッグ関連の状態
+  int? _draggingId;           // ドラッグ中のアイテムID
+  int? _dragOverGroupId;      // ホバー中のフォルダID（0.5秒タイマー用）
+  int? _dropInsertIndex;      // ドロップ挿入インデックス
+  bool _dropIntoFolder = false; // true=フォルダ内、false=フォルダ間
+  Timer? _hoverTimer;         // 0.5秒ホバー展開タイマー
+
+  @override
+  void dispose() {
+    _hoverTimer?.cancel();
+    super.dispose();
+  }
 
   void _toggleSelection(int id) {
     setState(() {
@@ -46,7 +58,25 @@ class _LayerPanelState extends State<LayerPanel> {
     });
   }
 
-  /// 選択レイヤーを一括結合（Kotlin側で1回のundo操作として処理）
+  /// 0.5秒ホバーでフォルダを自動展開
+  void _onDragHoverFolder(int folderId) {
+    if (_dragOverGroupId == folderId) return; // 同じフォルダなら無視
+    _hoverTimer?.cancel();
+    setState(() => _dragOverGroupId = folderId);
+    _hoverTimer = Timer(const Duration(milliseconds: 500), () {
+      if (_dragOverGroupId == folderId && mounted && !_expandedGroupIds.contains(folderId)) {
+        setState(() => _expandedGroupIds.add(folderId));
+      }
+    });
+  }
+
+  /// ドラッグがフォルダから離れた時
+  void _onDragLeaveFolder() {
+    _hoverTimer?.cancel();
+    setState(() => _dragOverGroupId = null);
+  }
+
+  /// 選択レイヤーを一括結合
   void _mergeSelected() {
     if (_selectedIds.length < 2) return;
     widget.channel.batchMergeLayers(_selectedIds.toList());
@@ -58,7 +88,6 @@ class _LayerPanelState extends State<LayerPanel> {
     for (final id in _selectedIds.toList()) {
       final layer = widget.state.layers.firstWhere((l) => l.id == id, orElse: () => LayerInfo(id: 0, name: ''));
       if (layer.isGroup) {
-        // フォルダは負のIDで表現されているため、正のIDに変換して削除
         widget.channel.deleteLayerGroup(-id);
       } else {
         widget.channel.removeLayer(id);
@@ -108,19 +137,44 @@ class _LayerPanelState extends State<LayerPanel> {
     widget.channel.setLayerGroup(layerId, groupId);
   }
 
+  /// ドロップ処理
+  void _onDropLayer(int draggedId, int targetIndex, bool intoFolder) {
+    if (targetIndex < 0 || targetIndex >= displayItems.length) return;
+
+    final oldItem = displayItems.firstWhere((item) => item.layer.id == draggedId, orElse: () => displayItems[0]);
+    final targetItem = displayItems[targetIndex];
+
+    if (intoFolder && targetItem.layer.isGroup) {
+      // フォルダ内に移動
+      widget.channel.setLayerGroup(draggedId, -targetItem.layer.id);
+    } else {
+      // レイヤー順序の変更
+      if (!oldItem.layer.isGroup && !targetItem.layer.isGroup) {
+        widget.channel.reorderLayer(oldItem.docIndex, targetItem.docIndex);
+      } else if (oldItem.layer.isGroup && targetItem.layer.isGroup) {
+        widget.channel.reorderLayerGroup(-oldItem.layer.id, -targetItem.layer.id);
+      }
+    }
+
+    setState(() {
+      _draggingId = null;
+      _dropInsertIndex = null;
+      _dragOverGroupId = null;
+    });
+  }
+
+  late final List<_LayerDisplayItem> displayItems;
+
   @override
   Widget build(BuildContext context) {
-    final allLayers = widget.state.layers.reversed.toList(); // 上位レイヤーが先
+    final allLayers = widget.state.layers.reversed.toList();
     final hasSelection = _selectedIds.isNotEmpty;
 
-    // フォルダと通常レイヤーを分ける
     final folders = allLayers.where((l) => l.isGroup).toList();
     final nonGroupLayers = allLayers.where((l) => !l.isGroup).toList();
 
-    // フォルダと関連レイヤーを構築
-    final displayItems = <_LayerDisplayItem>[];
-
-    // 各フォルダをその中のレイヤーと共に追加
+    // displayItems を構築
+    displayItems = <_LayerDisplayItem>[];
     for (final folder in folders) {
       final folderDocIndex = allLayers.indexWhere((l) => l.id == folder.id);
       displayItems.add(_LayerDisplayItem(
@@ -142,7 +196,6 @@ class _LayerPanelState extends State<LayerPanel> {
       }
     }
 
-    // グループに属さないレイヤーを追加
     for (final layer in nonGroupLayers) {
       if (layer.groupId == 0) {
         final layerDocIndex = allLayers.indexWhere((l) => l.id == layer.id);
@@ -205,45 +258,12 @@ class _LayerPanelState extends State<LayerPanel> {
           ),
           const Divider(color: C.border, height: 1),
 
-          // レイヤー一覧（ドラッグ & ドロップ対応）
+          // レイヤー一覧（カスタムドラッグ＆ドロップ対応）
           Flexible(
-            child: ReorderableListView.builder(
+            child: ListView.builder(
               shrinkWrap: true,
               padding: const EdgeInsets.only(bottom: 8),
               itemCount: displayItems.length,
-              onReorder: (oldIndex, newIndex) {
-                if (newIndex > oldIndex) newIndex--;
-
-                final oldItem = displayItems[oldIndex];
-                final newItem = displayItems[newIndex];
-
-                // ドロップ先がフォルダの場合：レイヤーをフォルダ内に移動
-                if (!oldItem.layer.isGroup && newItem.layer.isGroup) {
-                  widget.channel.setLayerGroup(oldItem.layer.id, -newItem.layer.id);
-                }
-                // 両方ともフォルダ：フォルダの順序を変更
-                else if (oldItem.layer.isGroup && newItem.layer.isGroup) {
-                  widget.channel.reorderLayerGroup(-oldItem.layer.id, -newItem.layer.id);
-                }
-                // 両方ともレイヤー：レイヤーの順序を変更
-                else if (!oldItem.layer.isGroup && !newItem.layer.isGroup) {
-                  widget.channel.reorderLayer(oldItem.docIndex, newItem.docIndex);
-                }
-                // その他の組み合わせは処理しない
-              },
-              proxyDecorator: (child, index, animation) {
-                return AnimatedBuilder(
-                  animation: animation,
-                  builder: (context, child) => Material(
-                    elevation: 6,
-                    color: Colors.transparent,
-                    shadowColor: C.accent.withAlpha(80),
-                    borderRadius: BorderRadius.circular(8),
-                    child: child,
-                  ),
-                  child: child,
-                );
-              },
               itemBuilder: (context, i) {
                 final item = displayItems[i];
                 final layer = item.layer;
@@ -251,38 +271,100 @@ class _LayerPanelState extends State<LayerPanel> {
                 final selected = _selectedIds.contains(layer.id);
                 final isFolder = layer.isGroup;
                 final isExpandedGroup = isFolder && _expandedGroupIds.contains(layer.id);
+                final isDragging = _draggingId == layer.id;
+                final showDropIndicator = _dropInsertIndex == i;
 
-                return _SwipeableLayerItem(
-                  key: ValueKey('${layer.id}_${item.depth}'),
-                  layer: layer,
-                  expanded: expanded,
-                  selected: selected,
-                  depth: item.depth,
-                  parentGroupId: item.parentGroupId,
-                  isExpandedGroup: isExpandedGroup,
-                  isDragOverTarget: _dragOverGroupId == layer.id && layer.isGroup,
-                  channel: widget.channel,
-                  onTap: () {
-                    if (hasSelection) {
-                      _toggleSelection(layer.id);
-                    } else {
-                      // フォルダの場合は展開/折畳、レイヤーの場合は選択
-                      if (layer.isGroup) {
-                        _toggleGroupExpanded(layer.id);
-                      } else {
-                        widget.channel.selectLayer(layer.id);
+                return LongPressDraggable<int>(
+                  data: layer.id,
+                  feedback: _buildDragFeedback(layer, item.depth),
+                  childWhenDragging: Opacity(
+                    opacity: 0.5,
+                    child: _buildLayerItem(
+                      context: context,
+                      layer: layer,
+                      item: item,
+                      expanded: expanded,
+                      selected: selected,
+                      isFolder: isFolder,
+                      isExpandedGroup: isExpandedGroup,
+                      isDragging: isDragging,
+                      folders: folders,
+                      isDragOverTarget: _dragOverGroupId == layer.id && isFolder,
+                      showDropIndicator: false,
+                    ),
+                  ),
+                  onDragStarted: () {
+                    setState(() => _draggingId = layer.id);
+                  },
+                  onDragEnd: (_) {
+                    setState(() {
+                      _draggingId = null;
+                      _dropInsertIndex = null;
+                      _dragOverGroupId = null;
+                    });
+                    _hoverTimer?.cancel();
+                  },
+                  child: DragTarget<int>(
+                    onMove: (details) {
+                      // フォルダの自動展開（ホバーディレイ）
+                      if (isFolder) {
+                        _onDragHoverFolder(layer.id);
                       }
-                    }
-                  },
-                  onToggleExpand: () {
-                    setState(() => _expandedLayerId = expanded ? null : layer.id);
-                  },
-                  onToggleGroup: () {
-                    _toggleGroupExpanded(layer.id);
-                  },
-                  onSwipeSelect: () => _toggleSelection(layer.id),
-                  onMoveToGroup: (layerId, groupId) => _moveLayerToGroup(layerId, groupId),
-                  availableGroups: folders.where((g) => g.id != layer.id).toList(),
+                      setState(() {
+                        _dropInsertIndex = i;
+                        _dropIntoFolder = isFolder;
+                      });
+                    },
+                    onLeave: (_) {
+                      if (isFolder) {
+                        _onDragLeaveFolder();
+                      }
+                    },
+                    onAcceptWithDetails: (details) {
+                      _onDropLayer(details.data, i, isFolder);
+                    },
+                    builder: (context, candidateData, rejectedData) {
+                      return Stack(
+                        children: [
+                          // インデント視覚ガイド（青い横線）
+                          if (showDropIndicator && !_dropIntoFolder)
+                            Positioned(
+                              top: 0,
+                              left: item.depth * 16.0 + 6.0,
+                              right: 6,
+                              child: Container(
+                                height: 2,
+                                color: C.accent,
+                              ),
+                            ),
+                          if (showDropIndicator && _dropIntoFolder && isFolder)
+                            Positioned(
+                              top: 40,
+                              left: (item.depth + 1) * 16.0 + 6.0,
+                              right: 6,
+                              child: Container(
+                                height: 2,
+                                color: C.accent,
+                              ),
+                            ),
+                          // レイヤーアイテム
+                          _buildLayerItem(
+                            context: context,
+                            layer: layer,
+                            item: item,
+                            expanded: expanded,
+                            selected: selected,
+                            isFolder: isFolder,
+                            isExpandedGroup: isExpandedGroup,
+                            isDragging: isDragging,
+                            folders: folders,
+                            isDragOverTarget: candidateData.isNotEmpty && isFolder,
+                            showDropIndicator: showDropIndicator && _dropIntoFolder && isFolder,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 );
               },
             ),
@@ -291,13 +373,93 @@ class _LayerPanelState extends State<LayerPanel> {
       ),
     );
   }
+
+  /// ドラッグ中のゴースト表示
+  Widget _buildDragFeedback(LayerInfo layer, int depth) {
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(8),
+      shadowColor: C.accent.withAlpha(100),
+      child: Container(
+        width: 260,
+        margin: EdgeInsets.only(left: depth * 16.0 + 6.0, right: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: C.card,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                layer.name,
+                style: TextStyle(
+                  color: layer.isActive ? C.accent : C.textPrimary,
+                  fontSize: 12,
+                  fontWeight: layer.isActive ? FontWeight.w600 : FontWeight.normal,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// レイヤーアイテムの構築
+  Widget _buildLayerItem({
+    required BuildContext context,
+    required LayerInfo layer,
+    required _LayerDisplayItem item,
+    required bool expanded,
+    required bool selected,
+    required bool isFolder,
+    required bool isExpandedGroup,
+    required bool isDragging,
+    required List<LayerInfo> folders,
+    required bool isDragOverTarget,
+    required bool showDropIndicator,
+  }) {
+    return _SwipeableLayerItem(
+      key: ValueKey('${layer.id}_${item.depth}'),
+      layer: layer,
+      expanded: expanded,
+      selected: selected,
+      depth: item.depth,
+      parentGroupId: item.parentGroupId,
+      isExpandedGroup: isExpandedGroup,
+      isDragOverTarget: isDragOverTarget,
+      channel: widget.channel,
+      onTap: () {
+        if (_selectedIds.isNotEmpty) {
+          _toggleSelection(layer.id);
+        } else {
+          if (isFolder) {
+            _toggleGroupExpanded(layer.id);
+          } else {
+            widget.channel.selectLayer(layer.id);
+          }
+        }
+      },
+      onToggleExpand: () {
+        setState(() => _expandedLayerId = expanded ? null : layer.id);
+      },
+      onToggleGroup: () {
+        _toggleGroupExpanded(layer.id);
+      },
+      onSwipeSelect: () => _toggleSelection(layer.id),
+      onMoveToGroup: (layerId, groupId) => _moveLayerToGroup(layerId, groupId),
+      availableGroups: folders.where((g) => g.id != layer.id).toList(),
+    );
+  }
 }
 
 class _LayerDisplayItem {
   final LayerInfo layer;
   final int depth;
   final int? parentGroupId;
-  final int docIndex;  // allLayers での実際のインデックス
+  final int docIndex;
 
   _LayerDisplayItem({
     required this.layer,
@@ -308,8 +470,6 @@ class _LayerDisplayItem {
 }
 
 /// スワイプ可能なレイヤーアイテム
-/// 左スワイプ: アクションボタン (削除・複製・結合)
-/// 右スワイプ: 選択トグル
 class _SwipeableLayerItem extends StatefulWidget {
   final LayerInfo layer;
   final bool expanded;
@@ -393,7 +553,7 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
           height: null,
           child: Stack(
             children: [
-              // 左スワイプ背景: アクションボタン
+              // 左スワイプ背景
               if (offset < -4)
                 Positioned.fill(
                   child: Container(
@@ -430,7 +590,6 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                           color: C.error,
                           onTap: () {
                             if (widget.layer.isGroup) {
-                              // フォルダは負のIDで表現されているため、正のIDに変換して削除
                               widget.channel.deleteLayerGroup(-widget.layer.id);
                             } else {
                               widget.channel.removeLayer(widget.layer.id);
@@ -443,7 +602,7 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                   ),
                 ),
 
-              // 右スワイプ背景: 選択
+              // 右スワイプ背景
               if (offset > 4)
                 Positioned.fill(
                   child: Container(
@@ -577,20 +736,19 @@ class _LayerItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // インデント用の左パディング
     final leftMargin = depth * 16.0 + 6.0;
 
     return Container(
       margin: EdgeInsets.only(left: leftMargin, right: 6, top: 2, bottom: 2),
       decoration: BoxDecoration(
         color: isDragOverTarget && layer.isGroup
-            ? C.accent.withAlpha(80)  // ドラッグオーバー中：強調表示
+            ? C.accent.withAlpha(80)
             : selected
                 ? C.accent.withAlpha(40)
                 : layer.isActive ? C.accentDim.withAlpha(60) : C.card,
         borderRadius: BorderRadius.circular(8),
         border: isDragOverTarget && layer.isGroup
-            ? Border.all(color: C.accent, width: 2)  // ドラッグオーバー中：太い枠線
+            ? Border.all(color: C.accent, width: 2)
             : selected
                 ? Border.all(color: C.accent, width: 1.5)
                 : layer.isActive
@@ -600,7 +758,6 @@ class _LayerItem extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // メイン行
           InkWell(
             onTap: onTap,
             borderRadius: BorderRadius.circular(8),
@@ -608,7 +765,6 @@ class _LayerItem extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
                 children: [
-                  // フォルダ: アイコンクリック可能 / レイヤー: 選択チェック or 表示トグル
                   if (layer.isGroup)
                     GestureDetector(
                       onTap: onToggleGroup,
@@ -636,7 +792,6 @@ class _LayerItem extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                   ],
-                  // フォルダでなければクリップ・ロック・Alpha Lock表示
                   if (!layer.isGroup) ...[
                     _TinyToggle(
                       icon: Icons.content_cut_rounded,
@@ -660,7 +815,6 @@ class _LayerItem extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                   ],
-                  // レイヤー名
                   Expanded(
                     child: Text(
                       layer.name,
@@ -672,14 +826,12 @@ class _LayerItem extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  // フォルダでなければ不透明度表示
                   if (!layer.isGroup)
                     Text(
                       '${(layer.opacity * 100).round()}%',
                       style: const TextStyle(color: C.textSecondary, fontSize: 11),
                     ),
                   if (!layer.isGroup) const SizedBox(width: 4),
-                  // フォルダ: グループ展開ボタン / レイヤー: 詳細展開ボタンまたはグループ移動メニュー
                   if (layer.isGroup)
                     GestureDetector(
                       onTap: onToggleGroup,
@@ -707,7 +859,6 @@ class _LayerItem extends StatelessWidget {
                         if (groupId == 0) {
                           onMoveToGroup(layer.id, 0);
                         } else {
-                          // フォルダは負のIDで表現されているため、正のIDに変換
                           onMoveToGroup(layer.id, -groupId);
                         }
                       },
@@ -731,7 +882,6 @@ class _LayerItem extends StatelessWidget {
             ),
           ),
 
-          // 展開部分 (フォルダでなければ表示)
           if (expanded && !layer.isGroup) _LayerExpanded(layer: layer, channel: channel),
         ],
       ),
@@ -752,7 +902,6 @@ class _LayerExpanded extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 不透明度スライダー
           PanelSlider(
             label: '不透明度',
             value: '${(layer.opacity * 100).round()}%',
@@ -763,7 +912,6 @@ class _LayerExpanded extends StatelessWidget {
 
           const SizedBox(height: 4),
 
-          // ブレンドモード
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(
@@ -805,7 +953,6 @@ class _LayerExpanded extends StatelessWidget {
 
           const SizedBox(height: 8),
 
-          // レイヤー操作ボタン
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
