@@ -19,6 +19,7 @@ class _LayerPanelState extends State<LayerPanel> {
   int? _expandedLayerId;
   final Set<int> _selectedIds = {};
   final Set<int> _expandedGroupIds = {};
+  int? _draggedLayerId;
   int? _dragOverGroupId;  // ドラッグオーバー中のグループID
 
   void _toggleSelection(int id) {
@@ -579,122 +580,52 @@ class _LayerItem extends StatelessWidget {
     // インデント用の左パディング
     final leftMargin = depth * 16.0 + 6.0;
 
-    return GestureDetector(
-      onLongPress: () {
-        showMenu<String>(
-          context: context,
-          position: const RelativeRect.fromLTRB(0, 0, 0, 0),
-          items: [
-            if (!layer.isGroup) ...[
-              PopupMenuItem(
-                value: 'duplicate',
-                child: Row(
-                  children: const [
-                    Icon(Icons.copy_rounded, size: 18),
-                    SizedBox(width: 8),
-                    Text('複製'),
-                  ],
-                ),
-                onTap: () => channel.duplicateLayer(layer.id),
-              ),
-              PopupMenuItem(
-                value: 'merge',
-                child: Row(
-                  children: const [
-                    Icon(Icons.merge_rounded, size: 18),
-                    SizedBox(width: 8),
-                    Text('結合'),
-                  ],
-                ),
-                onTap: () => channel.mergeDown(layer.id),
-              ),
-            ],
-            PopupMenuItem(
-              value: 'delete',
+    return Container(
+      margin: EdgeInsets.only(left: leftMargin, right: 6, top: 2, bottom: 2),
+      decoration: BoxDecoration(
+        color: isDragOverTarget && layer.isGroup
+            ? C.accent.withAlpha(80)  // ドラッグオーバー中：強調表示
+            : selected
+                ? C.accent.withAlpha(40)
+                : layer.isActive ? C.accentDim.withAlpha(60) : C.card,
+        borderRadius: BorderRadius.circular(8),
+        border: isDragOverTarget && layer.isGroup
+            ? Border.all(color: C.accent, width: 2)  // ドラッグオーバー中：太い枠線
+            : selected
+                ? Border.all(color: C.accent, width: 1.5)
+                : layer.isActive
+                    ? Border.all(color: C.accent.withAlpha(80), width: 1)
+                    : null,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // メイン行
+          InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
-                children: const [
-                  Icon(Icons.delete_rounded, size: 18),
-                  SizedBox(width: 8),
-                  Text('削除'),
-                ],
-              ),
-              onTap: () {
-                if (layer.isGroup) {
-                  channel.deleteLayerGroup(-layer.id);
-                } else {
-                  channel.removeLayer(layer.id);
-                }
-              },
-            ),
-            if (!layer.isGroup && availableGroups.isNotEmpty) ...[
-              const PopupMenuDivider(),
-              PopupMenuItem(
-                enabled: false,
-                child: const Text('グループに移動', style: TextStyle(fontSize: 12)),
-              ),
-              ...availableGroups.map((group) =>
-                PopupMenuItem(
-                  value: 'move_to_${group.id}',
-                  child: Row(
-                    children: [
-                      const Icon(Icons.folder_rounded, size: 18),
-                      const SizedBox(width: 8),
-                      Expanded(child: Text(group.name, overflow: TextOverflow.ellipsis)),
-                    ],
-                  ),
-                  onTap: () => onMoveToGroup(layer.id, -group.id),
-                ),
-              ),
-            ],
-          ],
-        );
-      },
-      child: Container(
-        margin: EdgeInsets.only(left: leftMargin, right: 6, top: 2, bottom: 2),
-        decoration: BoxDecoration(
-          color: isDragOverTarget && layer.isGroup
-              ? C.accent.withAlpha(80)  // ドラッグオーバー中：強調表示
-              : selected
-                  ? C.accent.withAlpha(40)
-                  : layer.isActive ? C.accentDim.withAlpha(60) : C.card,
-          borderRadius: BorderRadius.circular(8),
-          border: isDragOverTarget && layer.isGroup
-              ? Border.all(color: C.accent, width: 2)  // ドラッグオーバー中：太い枠線
-              : selected
-                  ? Border.all(color: C.accent, width: 1.5)
-                  : layer.isActive
-                      ? Border.all(color: C.accent.withAlpha(80), width: 1)
-                      : null,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // メイン行
-            InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                child: Row(
-                  children: [
-                    // フォルダ: 展開/折畳矢印 / レイヤー: 選択チェック or 表示トグル
-                    if (layer.isGroup)
-                      GestureDetector(
-                        onTap: onToggleGroup,
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: Icon(
-                            isExpandedGroup ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                            size: 18,
-                            color: C.accent,
-                          ),
+                children: [
+                  // フォルダ: アイコンクリック可能 / レイヤー: 選択チェック or 表示トグル
+                  if (layer.isGroup)
+                    GestureDetector(
+                      onTap: onToggleGroup,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.folder_rounded,
+                          size: 18,
+                          color: C.accent,
                         ),
-                      )
-                    else if (selected)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(Icons.check_circle_rounded, size: 18, color: C.accent),
-                      )
+                      ),
+                    )
+                  else if (selected)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(Icons.check_circle_rounded, size: 18, color: C.accent),
+                    )
                   else ...[
                     _TinyToggle(
                       icon: Icons.visibility_rounded,
@@ -804,7 +735,6 @@ class _LayerItem extends StatelessWidget {
           if (expanded && !layer.isGroup) _LayerExpanded(layer: layer, channel: channel),
         ],
       ),
-    ),
     );
   }
 }
