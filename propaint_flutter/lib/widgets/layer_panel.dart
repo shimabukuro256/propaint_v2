@@ -18,6 +18,8 @@ class LayerPanel extends StatefulWidget {
 class _LayerPanelState extends State<LayerPanel> {
   int? _expandedLayerId;
   final Set<int> _selectedIds = {};
+  final Set<int> _expandedGroupIds = {};
+  int? _draggedLayerId;
 
   void _toggleSelection(int id) {
     setState(() {
@@ -33,6 +35,16 @@ class _LayerPanelState extends State<LayerPanel> {
     setState(() => _selectedIds.clear());
   }
 
+  void _toggleGroupExpanded(int groupId) {
+    setState(() {
+      if (_expandedGroupIds.contains(groupId)) {
+        _expandedGroupIds.remove(groupId);
+      } else {
+        _expandedGroupIds.add(groupId);
+      }
+    });
+  }
+
   /// 選択レイヤーを一括結合（Kotlin側で1回のundo操作として処理）
   void _mergeSelected() {
     if (_selectedIds.length < 2) return;
@@ -43,7 +55,12 @@ class _LayerPanelState extends State<LayerPanel> {
   /// 選択レイヤーを一括削除
   void _deleteSelected() {
     for (final id in _selectedIds.toList()) {
-      widget.channel.removeLayer(id);
+      final layer = widget.state.layers.firstWhere((l) => l.id == id, orElse: () => LayerInfo(id: 0, name: ''));
+      if (layer.isGroup) {
+        widget.channel.deleteLayerGroup(id);
+      } else {
+        widget.channel.removeLayer(id);
+      }
     }
     _clearSelection();
   }
@@ -84,10 +101,40 @@ class _LayerPanelState extends State<LayerPanel> {
     );
   }
 
+  /// レイヤーをグループに移動
+  void _moveLayerToGroup(int layerId, int groupId) {
+    widget.channel.setLayerGroup(layerId, groupId);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final layers = widget.state.layers.reversed.toList(); // 上位レイヤーが先
+    final allLayers = widget.state.layers.reversed.toList(); // 上位レイヤーが先
     final hasSelection = _selectedIds.isNotEmpty;
+
+    // フォルダと通常レイヤーを分ける
+    final folders = allLayers.where((l) => l.isGroup).toList();
+    final nonGroupLayers = allLayers.where((l) => !l.isGroup).toList();
+
+    // フォルダと関連レイヤーを構築
+    final displayItems = <_LayerDisplayItem>[];
+
+    // 各フォルダをその中のレイヤーと共に追加
+    for (final folder in folders) {
+      displayItems.add(_LayerDisplayItem(layer: folder, depth: 0));
+      if (_expandedGroupIds.contains(folder.id)) {
+        final groupLayers = nonGroupLayers.where((l) => l.groupId == folder.id).toList();
+        for (final layer in groupLayers) {
+          displayItems.add(_LayerDisplayItem(layer: layer, depth: 1, parentGroupId: folder.id));
+        }
+      }
+    }
+
+    // グループに属さないレイヤーを追加
+    for (final layer in nonGroupLayers) {
+      if (layer.groupId == 0) {
+        displayItems.add(_LayerDisplayItem(layer: layer, depth: 0));
+      }
+    }
 
     return PanelCard(
       width: 280,
@@ -140,45 +187,31 @@ class _LayerPanelState extends State<LayerPanel> {
           ),
           const Divider(color: C.border, height: 1),
 
-          // レイヤー一覧 (ドラッグ並び替え対応)
+          // レイヤー一覧（階層対応）
           Flexible(
-            child: ReorderableListView.builder(
+            child: ListView.builder(
               shrinkWrap: true,
               padding: const EdgeInsets.only(bottom: 8),
-              itemCount: layers.length,
-              onReorder: (oldIndex, newIndex) {
-                if (newIndex > oldIndex) newIndex--;
-                // 表示順(reversed)からドキュメント順に変換
-                final docOldIndex = layers.length - 1 - oldIndex;
-                final docNewIndex = layers.length - 1 - newIndex;
-                widget.channel.reorderLayer(docOldIndex, docNewIndex);
-              },
-              proxyDecorator: (child, index, animation) {
-                return AnimatedBuilder(
-                  animation: animation,
-                  builder: (context, child) => Material(
-                    elevation: 6,
-                    color: Colors.transparent,
-                    shadowColor: C.accent.withAlpha(80),
-                    borderRadius: BorderRadius.circular(8),
-                    child: child,
-                  ),
-                  child: child,
-                );
-              },
+              itemCount: displayItems.length,
               itemBuilder: (context, i) {
-                final layer = layers[i];
+                final item = displayItems[i];
+                final layer = item.layer;
                 final expanded = _expandedLayerId == layer.id;
                 final selected = _selectedIds.contains(layer.id);
+                final isFolder = layer.isGroup;
+                final isExpandedGroup = isFolder && _expandedGroupIds.contains(layer.id);
+
                 return _SwipeableLayerItem(
-                  key: ValueKey(layer.id),
+                  key: ValueKey('${layer.id}_${item.depth}'),
                   layer: layer,
                   expanded: expanded,
                   selected: selected,
+                  depth: item.depth,
+                  parentGroupId: item.parentGroupId,
+                  isExpandedGroup: isExpandedGroup,
                   channel: widget.channel,
                   onTap: () {
                     if (hasSelection) {
-                      // 選択モード中はタップで選択トグル
                       _toggleSelection(layer.id);
                     } else {
                       widget.channel.selectLayer(layer.id);
@@ -187,7 +220,12 @@ class _LayerPanelState extends State<LayerPanel> {
                   onToggleExpand: () {
                     setState(() => _expandedLayerId = expanded ? null : layer.id);
                   },
+                  onToggleGroup: () {
+                    _toggleGroupExpanded(layer.id);
+                  },
                   onSwipeSelect: () => _toggleSelection(layer.id),
+                  onMoveToGroup: (layerId, groupId) => _moveLayerToGroup(layerId, groupId),
+                  availableGroups: folders.where((g) => g.id != layer.id).toList(),
                 );
               },
             ),
@@ -198,6 +236,14 @@ class _LayerPanelState extends State<LayerPanel> {
   }
 }
 
+class _LayerDisplayItem {
+  final LayerInfo layer;
+  final int depth;
+  final int? parentGroupId;
+
+  _LayerDisplayItem({required this.layer, required this.depth, this.parentGroupId});
+}
+
 /// スワイプ可能なレイヤーアイテム
 /// 左スワイプ: アクションボタン (削除・複製・結合)
 /// 右スワイプ: 選択トグル
@@ -205,20 +251,32 @@ class _SwipeableLayerItem extends StatefulWidget {
   final LayerInfo layer;
   final bool expanded;
   final bool selected;
+  final int depth;
+  final int? parentGroupId;
+  final bool isExpandedGroup;
   final PaintChannel channel;
   final VoidCallback onTap;
   final VoidCallback onToggleExpand;
+  final VoidCallback onToggleGroup;
   final VoidCallback onSwipeSelect;
+  final Function(int, int) onMoveToGroup;
+  final List<LayerInfo> availableGroups;
 
   const _SwipeableLayerItem({
     required super.key,
     required this.layer,
     required this.expanded,
     required this.selected,
+    required this.depth,
+    this.parentGroupId,
+    required this.isExpandedGroup,
     required this.channel,
     required this.onTap,
     required this.onToggleExpand,
+    required this.onToggleGroup,
     required this.onSwipeSelect,
+    required this.onMoveToGroup,
+    required this.availableGroups,
   });
 
   @override
@@ -270,8 +328,8 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
           height: null,
           child: Stack(
             children: [
-              // 左スワイプ背景: アクションボタン (フォルダでなければ表示)
-              if (offset < -4 && !widget.layer.isGroup)
+              // 左スワイプ背景: アクションボタン
+              if (offset < -4)
                 Positioned.fill(
                   child: Container(
                     alignment: Alignment.centerRight,
@@ -279,32 +337,38 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _ActionChip(
-                          icon: Icons.copy_rounded,
-                          label: '複製',
-                          color: C.accent,
-                          onTap: () {
-                            widget.channel.duplicateLayer(widget.layer.id);
-                            _animateTo(0);
-                          },
-                        ),
-                        const SizedBox(width: 2),
-                        _ActionChip(
-                          icon: Icons.merge_rounded,
-                          label: '結合',
-                          color: C.textSecondary,
-                          onTap: () {
-                            widget.channel.mergeDown(widget.layer.id);
-                            _animateTo(0);
-                          },
-                        ),
-                        const SizedBox(width: 2),
+                        if (!widget.layer.isGroup) ...[
+                          _ActionChip(
+                            icon: Icons.copy_rounded,
+                            label: '複製',
+                            color: C.accent,
+                            onTap: () {
+                              widget.channel.duplicateLayer(widget.layer.id);
+                              _animateTo(0);
+                            },
+                          ),
+                          const SizedBox(width: 2),
+                          _ActionChip(
+                            icon: Icons.merge_rounded,
+                            label: '結合',
+                            color: C.textSecondary,
+                            onTap: () {
+                              widget.channel.mergeDown(widget.layer.id);
+                              _animateTo(0);
+                            },
+                          ),
+                          const SizedBox(width: 2),
+                        ],
                         _ActionChip(
                           icon: Icons.delete_rounded,
                           label: '削除',
                           color: C.error,
                           onTap: () {
-                            widget.channel.removeLayer(widget.layer.id);
+                            if (widget.layer.isGroup) {
+                              widget.channel.deleteLayerGroup(widget.layer.id);
+                            } else {
+                              widget.channel.removeLayer(widget.layer.id);
+                            }
                             _animateTo(0);
                           },
                         ),
@@ -360,9 +424,14 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                     layer: widget.layer,
                     expanded: widget.expanded,
                     selected: widget.selected,
+                    depth: widget.depth,
+                    isExpandedGroup: widget.isExpandedGroup,
                     channel: widget.channel,
                     onTap: widget.onTap,
                     onToggleExpand: widget.onToggleExpand,
+                    onToggleGroup: widget.onToggleGroup,
+                    onMoveToGroup: widget.onMoveToGroup,
+                    availableGroups: widget.availableGroups,
                   ),
                 ),
               ),
@@ -414,23 +483,36 @@ class _LayerItem extends StatelessWidget {
   final LayerInfo layer;
   final bool expanded;
   final bool selected;
+  final int depth;
+  final bool isExpandedGroup;
   final PaintChannel channel;
   final VoidCallback onTap;
   final VoidCallback onToggleExpand;
+  final VoidCallback onToggleGroup;
+  final Function(int, int) onMoveToGroup;
+  final List<LayerInfo> availableGroups;
 
   const _LayerItem({
     required this.layer,
     required this.expanded,
     required this.selected,
+    required this.depth,
+    required this.isExpandedGroup,
     required this.channel,
     required this.onTap,
     required this.onToggleExpand,
+    required this.onToggleGroup,
+    required this.onMoveToGroup,
+    required this.availableGroups,
   });
 
   @override
   Widget build(BuildContext context) {
+    // インデント用の左パディング
+    final leftMargin = depth * 16.0 + 6.0;
+
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      margin: EdgeInsets.only(left: leftMargin, right: 6, top: 2, bottom: 2),
       decoration: BoxDecoration(
         color: selected
             ? C.accent.withAlpha(40)
@@ -453,14 +535,17 @@ class _LayerItem extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
                 children: [
-                  // フォルダ: アイコン表示 / レイヤー: 選択チェック or 表示トグル
+                  // フォルダ: アイコンクリック可能 / レイヤー: 選択チェック or 表示トグル
                   if (layer.isGroup)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Icon(
-                        Icons.folder_rounded,
-                        size: 18,
-                        color: C.accent,
+                    GestureDetector(
+                      onTap: onToggleGroup,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.folder_rounded,
+                          size: 18,
+                          color: C.accent,
+                        ),
                       ),
                     )
                   else if (selected)
@@ -521,15 +606,52 @@ class _LayerItem extends StatelessWidget {
                       style: const TextStyle(color: C.textSecondary, fontSize: 11),
                     ),
                   if (!layer.isGroup) const SizedBox(width: 4),
-                  // 展開ボタン
-                  GestureDetector(
-                    onTap: onToggleExpand,
-                    child: Icon(
-                      expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                      size: 20,
-                      color: C.textSecondary,
+                  // フォルダ: グループ展開ボタン / レイヤー: 詳細展開ボタンまたはグループ移動メニュー
+                  if (layer.isGroup)
+                    GestureDetector(
+                      onTap: onToggleGroup,
+                      child: Icon(
+                        isExpandedGroup ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                        size: 20,
+                        color: C.textSecondary,
+                      ),
+                    )
+                  else if (availableGroups.isNotEmpty)
+                    PopupMenuButton<int>(
+                      itemBuilder: (context) => [
+                        const PopupMenuItem(
+                          value: 0,
+                          child: Text('フォルダなし'),
+                        ),
+                        ...availableGroups.map((group) =>
+                          PopupMenuItem(
+                            value: group.id,
+                            child: Text(group.name),
+                          ),
+                        ),
+                      ],
+                      onSelected: (groupId) {
+                        if (groupId == 0) {
+                          onMoveToGroup(layer.id, 0);
+                        } else {
+                          onMoveToGroup(layer.id, groupId);
+                        }
+                      },
+                      child: Icon(
+                        Icons.more_vert_rounded,
+                        size: 20,
+                        color: C.textSecondary,
+                      ),
+                    )
+                  else
+                    GestureDetector(
+                      onTap: onToggleExpand,
+                      child: Icon(
+                        expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                        size: 20,
+                        color: C.textSecondary,
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
