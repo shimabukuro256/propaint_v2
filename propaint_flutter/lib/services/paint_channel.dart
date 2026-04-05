@@ -155,6 +155,9 @@ class PaintChannel {
   Future<void> setGroupOpacity(int groupId, double opacity) =>
       _method.invokeMethod('setGroupOpacity', {'groupId': groupId, 'opacity': opacity});
 
+  Future<void> reorderLayerGroup(int fromGroupId, int toGroupId) =>
+      _method.invokeMethod('reorderLayerGroup', {'fromGroupId': fromGroupId, 'toGroupId': toGroupId});
+
   // ─── 保存/エクスポート ────────────────────────────────
 
   Future<void> saveProject() => _method.invokeMethod('saveProject');

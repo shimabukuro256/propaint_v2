@@ -294,6 +294,11 @@ class PaintMethodChannelHandler(
                 val opacity = call.argument<Double>("opacity")?.toFloat()?.coerceIn(0f, 1f) ?: 1f
                 launchHeavy(result) { viewModel.setGroupOpacity(groupId, opacity) }
             }
+            "reorderLayerGroup" -> {
+                val fromGroupId = call.argument<Int>("fromGroupId") ?: return result.error("INVALID_ARG", "fromGroupId is required", null)
+                val toGroupId = call.argument<Int>("toGroupId") ?: return result.error("INVALID_ARG", "toGroupId is required", null)
+                launchHeavy(result) { viewModel.reorderLayerGroup(fromGroupId, toGroupId) }
+            }
 
             // ── ツールモード ──
             "activateEyedropper" -> { viewModel.activateEyedropper(); result.success(null) }

@@ -1357,7 +1357,8 @@ class CanvasDocument(val width: Int, val height: Int) {
 
     // ── レイヤーグループ ────────────────────────────────────────
 
-    private val _layerGroups = HashMap<Int, LayerGroupInfo>()
+    // LinkedHashMap で挿入順序（UI での表示順）を保持
+    private val _layerGroups = LinkedHashMap<Int, LayerGroupInfo>()
     val layerGroups: Map<Int, LayerGroupInfo> get() = _layerGroups
     private var nextGroupId = 1
 
@@ -1397,6 +1398,32 @@ class CanvasDocument(val width: Int, val height: Int) {
     fun setGroupOpacity(groupId: Int, opacity: Float) = lock.withLock {
         _layerGroups[groupId]?.opacity = opacity.coerceIn(0f, 1f)
         dirtyTracker.markFullRebuild()
+    }
+
+    fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int) = lock.withLock {
+        if (!_layerGroups.containsKey(fromGroupId) || !_layerGroups.containsKey(toGroupId)) return
+        if (fromGroupId == toGroupId) return
+
+        val groupList = _layerGroups.keys.toMutableList()
+        val fromIdx = groupList.indexOf(fromGroupId)
+        val toIdx = groupList.indexOf(toGroupId)
+
+        if (fromIdx < 0 || toIdx < 0) return
+
+        // fromGroupId を削除して toIdx の位置に再挿入
+        groupList.removeAt(fromIdx)
+        val newToIdx = if (fromIdx < toIdx) toIdx - 1 else toIdx
+        groupList.add(newToIdx, fromGroupId)
+
+        // LinkedHashMap を再構築
+        val newGroups = LinkedHashMap<Int, LayerGroupInfo>()
+        for (id in groupList) {
+            newGroups[id] = _layerGroups[id]!!
+        }
+
+        _layerGroups.clear()
+        _layerGroups.putAll(newGroups)
+        PaintDebug.d(PaintDebug.Layer) { "[reorderLayerGroup] from=$fromGroupId to=$toGroupId" }
     }
 
     // ── レイヤーマスク ──────────────────────────────────────────

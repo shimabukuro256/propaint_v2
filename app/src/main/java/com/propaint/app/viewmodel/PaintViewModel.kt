@@ -1253,6 +1253,12 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         doc.moveLayer(fromIndex, toIndex)
         updateLayerState()
     }
+
+    fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int) {
+        val doc = _document ?: return
+        doc.reorderLayerGroup(fromGroupId, toGroupId)
+        updateLayerState()
+    }
     fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; hasUnsavedChanges = true; updateLayerState() }
     fun duplicateLayer(id: Int) { _document?.duplicateLayer(id); updateLayerState() }
     fun mergeDown(id: Int) { _document?.mergeDown(id); updateLayerState() }

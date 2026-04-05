@@ -121,11 +121,22 @@ class _LayerPanelState extends State<LayerPanel> {
 
     // 各フォルダをその中のレイヤーと共に追加
     for (final folder in folders) {
-      displayItems.add(_LayerDisplayItem(layer: folder, depth: 0));
+      final folderDocIndex = allLayers.indexWhere((l) => l.id == folder.id);
+      displayItems.add(_LayerDisplayItem(
+        layer: folder,
+        depth: 0,
+        docIndex: folderDocIndex,
+      ));
       if (_expandedGroupIds.contains(folder.id)) {
         final groupLayers = nonGroupLayers.where((l) => l.groupId == folder.id).toList();
         for (final layer in groupLayers) {
-          displayItems.add(_LayerDisplayItem(layer: layer, depth: 1, parentGroupId: folder.id));
+          final layerDocIndex = allLayers.indexWhere((l) => l.id == layer.id);
+          displayItems.add(_LayerDisplayItem(
+            layer: layer,
+            depth: 1,
+            parentGroupId: folder.id,
+            docIndex: layerDocIndex,
+          ));
         }
       }
     }
@@ -133,7 +144,12 @@ class _LayerPanelState extends State<LayerPanel> {
     // グループに属さないレイヤーを追加
     for (final layer in nonGroupLayers) {
       if (layer.groupId == 0) {
-        displayItems.add(_LayerDisplayItem(layer: layer, depth: 0));
+        final layerDocIndex = allLayers.indexWhere((l) => l.id == layer.id);
+        displayItems.add(_LayerDisplayItem(
+          layer: layer,
+          depth: 0,
+          docIndex: layerDocIndex,
+        ));
       }
     }
 
@@ -188,12 +204,41 @@ class _LayerPanelState extends State<LayerPanel> {
           ),
           const Divider(color: C.border, height: 1),
 
-          // レイヤー一覧（階層対応）
+          // レイヤー一覧（ドラッグ & ドロップ対応）
           Flexible(
-            child: ListView.builder(
+            child: ReorderableListView.builder(
               shrinkWrap: true,
               padding: const EdgeInsets.only(bottom: 8),
               itemCount: displayItems.length,
+              onReorder: (oldIndex, newIndex) {
+                if (newIndex > oldIndex) newIndex--;
+
+                final oldItem = displayItems[oldIndex];
+                final newItem = displayItems[newIndex];
+
+                // フォルダの場合は reorderLayerGroup、レイヤーの場合は reorderLayer
+                if (oldItem.layer.isGroup && newItem.layer.isGroup) {
+                  // 両方ともフォルダ：フォルダの順序を変更
+                  widget.channel.reorderLayerGroup(-oldItem.layer.id, -newItem.layer.id);
+                } else if (!oldItem.layer.isGroup && !newItem.layer.isGroup) {
+                  // 両方ともレイヤー：レイヤーの順序を変更
+                  widget.channel.reorderLayer(oldItem.docIndex, newItem.docIndex);
+                }
+                // フォルダとレイヤーの混在は並び替えしない（ドラッグ開始位置がフォルダ内の場合）
+              },
+              proxyDecorator: (child, index, animation) {
+                return AnimatedBuilder(
+                  animation: animation,
+                  builder: (context, child) => Material(
+                    elevation: 6,
+                    color: Colors.transparent,
+                    shadowColor: C.accent.withAlpha(80),
+                    borderRadius: BorderRadius.circular(8),
+                    child: child,
+                  ),
+                  child: child,
+                );
+              },
               itemBuilder: (context, i) {
                 final item = displayItems[i];
                 final layer = item.layer;
@@ -244,8 +289,14 @@ class _LayerDisplayItem {
   final LayerInfo layer;
   final int depth;
   final int? parentGroupId;
+  final int docIndex;  // allLayers での実際のインデックス
 
-  _LayerDisplayItem({required this.layer, required this.depth, this.parentGroupId});
+  _LayerDisplayItem({
+    required this.layer,
+    required this.depth,
+    this.parentGroupId,
+    required this.docIndex,
+  });
 }
 
 /// スワイプ可能なレイヤーアイテム
