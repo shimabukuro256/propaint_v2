@@ -18,16 +18,22 @@ import java.nio.ByteOrder
 object PsdExporter {
 
     fun export(doc: CanvasDocument, output: OutputStream) {
-        PaintDebug.d(PaintDebug.Layer) {
-            "[PsdExporter] width=${doc.width} height=${doc.height} layers=${doc.layers.size}"
-        }
-
-        val buf = ByteArrayOutputStream(doc.width * doc.height * 4)
-        val out = PsdOutputStream(buf)
-
         val w = doc.width
         val h = doc.height
         val layers = doc.layers
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[PsdExporter] width=$w height=$h layers=${layers.size}"
+        }
+
+        require(w > 0 && h > 0) { "[PsdExporter] invalid canvas size: ${w}x${h}" }
+
+        if (layers.isEmpty()) {
+            PaintDebug.d(PaintDebug.Layer) { "[PsdExporter] WARNING: no layers to export" }
+        }
+
+        val buf = ByteArrayOutputStream(w * h * 4)
+        val out = PsdOutputStream(buf)
 
         // ── File Header ──
         out.writeInt(0x38425053) // "8BPS"
@@ -235,6 +241,10 @@ object PsdExporter {
             }
         }
 
+        val totalBytes = buf.size()
+        PaintDebug.d(PaintDebug.Layer) {
+            "[PsdExporter] writing $totalBytes bytes to output"
+        }
         buf.writeTo(output)
         output.flush()
     }

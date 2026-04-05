@@ -157,17 +157,27 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
     }
 
     private fun handleExport(uri: Uri) {
-        val format = pendingExportFormat ?: return
-        // 画像エンコード等の重い I/O を IO スレッドで実行 (ANR 防止)
+        val format = pendingExportFormat ?: run {
+            PaintDebug.d(PaintDebug.Layer) { "[Export] pendingExportFormat is null, skipping export" }
+            return
+        }
+        // 画���エンコード等の重い I/O を IO スレッドで実行 (ANR 防止)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                contentResolver.openOutputStream(uri)?.use { os ->
+                val os = contentResolver.openOutputStream(uri)
+                if (os == null) {
+                    PaintDebug.d(PaintDebug.Layer) { "[Export] openOutputStream returned null for $uri" }
+                    return@launch
+                }
+                os.use {
+                    PaintDebug.d(PaintDebug.Layer) { "[Export] starting $format export" }
                     when (format) {
-                        "png" -> viewModel.exportPng(os)
-                        "jpeg" -> viewModel.exportJpeg(os)
-                        "psd" -> viewModel.exportPsd(os)
-                        "project" -> viewModel.saveProject(os)
+                        "png" -> viewModel.exportPng(it)
+                        "jpeg" -> viewModel.exportJpeg(it)
+                        "psd" -> viewModel.exportPsd(it)
+                        "project" -> viewModel.saveProject(it)
                     }
+                    PaintDebug.d(PaintDebug.Layer) { "[Export] $format export completed" }
                 }
                 val label = when (format) {
                     "png" -> "PNG"

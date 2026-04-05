@@ -167,25 +167,27 @@ class _LayerPanelState extends State<LayerPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final allLayers = widget.state.layers.reversed.toList();
+    final allLayers = widget.state.layers.reversed.toList(); // UI表示用（上が先）
     final hasSelection = _selectedIds.isNotEmpty;
 
     final folders = allLayers.where((l) => l.isGroup).toList();
     final nonGroupLayers = allLayers.where((l) => !l.isGroup).toList();
 
+    // doc.layers インデックス計算用（Kotlin側の元の順序、非グループのみ）
+    final docLayers = widget.state.layers.where((l) => !l.isGroup).toList();
+
     // displayItems を構築
     displayItems = <_LayerDisplayItem>[];
     for (final folder in folders) {
-      final folderDocIndex = allLayers.indexWhere((l) => l.id == folder.id);
       displayItems.add(_LayerDisplayItem(
         layer: folder,
         depth: 0,
-        docIndex: folderDocIndex,
+        docIndex: -1, // フォルダにはdocIndexは不要
       ));
       if (_expandedGroupIds.contains(folder.id)) {
-        final groupLayers = nonGroupLayers.where((l) => l.groupId == folder.id).toList();
+        final groupLayers = nonGroupLayers.where((l) => l.groupId == -folder.id).toList();
         for (final layer in groupLayers) {
-          final layerDocIndex = allLayers.indexWhere((l) => l.id == layer.id);
+          final layerDocIndex = docLayers.indexWhere((l) => l.id == layer.id);
           displayItems.add(_LayerDisplayItem(
             layer: layer,
             depth: 1,
@@ -198,7 +200,7 @@ class _LayerPanelState extends State<LayerPanel> {
 
     for (final layer in nonGroupLayers) {
       if (layer.groupId == 0) {
-        final layerDocIndex = allLayers.indexWhere((l) => l.id == layer.id);
+        final layerDocIndex = docLayers.indexWhere((l) => l.id == layer.id);
         displayItems.add(_LayerDisplayItem(
           layer: layer,
           depth: 0,
