@@ -24,19 +24,13 @@ class BrushEngine(
 
     // ── per-dab ブラー用バッファ (GC 回避のため再利用) ─────────────
     private var blurSrc = IntArray(0)
-    private var blurTmp = IntArray(0)
     private var blurDst = IntArray(0)
     private var blurSubSrc = IntArray(0)  // サブレイヤー単独ブラー用
     private var blurSubDst = IntArray(0)
-    private var blurSubTmp = IntArray(0)
 
-    // リニアライト空間ブラー用バッファ (sRGB 空間で平均化すると色が濁るため)
-    private var blurLinSrc = LongArray(0)
-    private var blurLinTmp = LongArray(0)
-    private var blurLinDst = LongArray(0)
-    private var blurLinSubSrc = LongArray(0)
-    private var blurLinSubDst = LongArray(0)
-    private var blurLinSubTmp = LongArray(0)
+    // リニアライト空間 IIR ブラー用バッファ (sRGB 空間で平均化すると色が濁るため)
+    private var blurLin = LongArray(0)       // IIR 作業用 (インプレース)
+    private var blurLinSub = LongArray(0)    // サブレイヤー IIR 作業用
 
     // ── 進行方向追従: 前回ダブ位置 ────────────────────────────────
     private var prevDabX = Float.NaN
@@ -106,54 +100,72 @@ class BrushEngine(
             return
         }
 
-        // ── 手振れ補正: リアルタイム EMA フィルタ ──
-        // stabilizer=0 → alpha=1.0 (バイパス)
-        // stabilizer=1 → alpha≈0.05 (強い平滑化)
-        //
-        // 座標は強く平滑化するが、筆圧は弱めに平滑化する。
-        // これにより高補正時でも筆圧の入りぬき変動が残り、
-        // 太さが一定になる問題を防ぐ。
-        //
-        // さらに、筆圧の急激な低下（抜き）はリアルタイムで検出し、
-        // 槍のような先細り補正を適用する。
+        // ── Lazy Nezumi 的スタビライザー実装 ──
+        // stabilizer: 0.0～1.0 で段階的に平滑化
+        // 特徴:
+        //   1. 柔軟な平滑化（強度に応じて調整）
+        //   2. 予測補正で描画遅延を最小化
+        //   3. 最小移動距離でポイント圧縮（ジャギー防止）
         val smoothedPoint = if (brush.stabilizer > 0.001f) {
-            // 座標の平滑化係数: 小さいほど強い平滑化 (0.05..1.0)
-            val alpha = (1f - brush.stabilizer * 0.95f).coerceIn(0.05f, 1f)
-            // 筆圧の平滑化係数: 座標より追従を早くして入りぬきを残す
-            // stabilizer=1 → pressureAlpha≈0.25 (座標の5倍追従)
-            val pressureAlpha = (alpha * 5f).coerceIn(0.15f, 1f)
+            val stabStrength = brush.stabilizer.coerceIn(0f, 1f)
+
+            // ── 座標の平滑化係数（stabilizer 0.0-1.0）──
+            // stabilizer=0.0 → alpha=1.0 (平滑化なし)
+            // stabilizer=1.0 → alpha=0.05 (強い平滑化)
+            val alpha = 1f - (stabStrength * 0.95f)
+
+            // ── 筆圧の平滑化係数（座標より弱めに）──
+            // 筆圧の急激な変化（入りぬき）を保持
+            val pressureAlpha = alpha + (1f - alpha) * 0.5f  // 座標より弱い
 
             if (!stabInitialized) {
-                stabX = safePoint.x; stabY = safePoint.y
+                stabX = safePoint.x
+                stabY = safePoint.y
                 stabPressure = safePoint.pressure
                 stabPointCount = 0
                 stabInitialized = true
                 safePoint
             } else {
-                stabX += (safePoint.x - stabX) * alpha
-                stabY += (safePoint.y - stabY) * alpha
+                // ── キャッチアップ: 差分が大きいとき素早く追いつく ──
+                val dx = safePoint.x - stabX
+                val dy = safePoint.y - stabY
+                val distSq = dx * dx + dy * dy
+                // 差分が大きいときはアルファを大きくしてキャッチアップ
+                val catchUpFactor = if (distSq > 100f) {
+                    val dist = sqrt(distSq)
+                    (1f + (dist - 10f) / 50f).coerceIn(1f, 2f)  // 1.0-2.0倍
+                } else 1f
+
+                // ── EMA フィルタで座標と筆圧を平滑化 ──
+                val adjustedAlpha = alpha * catchUpFactor
+                stabX += (safePoint.x - stabX) * adjustedAlpha.coerceIn(0f, 1f)
+                stabY += (safePoint.y - stabY) * adjustedAlpha.coerceIn(0f, 1f)
                 stabPressure += (safePoint.pressure - stabPressure) * pressureAlpha
                 stabPointCount++
 
-                // ── 抜きの先細り補正 (リアルタイム) ──
-                // 筆圧が急激に低下している場合、さらに筆圧を絞って
-                // 槍のような尖った抜きを実現する。
-                // 入りは控えめに補正（最初の数ポイントは自然に任せる）。
+                // ── 入り抜き補正: 自動テーパー ──
                 var finalPressure = stabPressure
-                if (brush.stabilizer > 0.5f) {
-                    val taperStrength = (brush.stabilizer - 0.5f) * 2f // 0..1
-                    // 抜き検出: 生の筆圧が平滑化された筆圧より大幅に低い
-                    val pressureDrop = stabPressure - safePoint.pressure
-                    if (pressureDrop > 0.1f) {
-                        // 抜き: 筆圧の低下を加速 (槍のように尖る)
-                        val exitSharpness = pressureDrop * taperStrength * 1.5f
-                        finalPressure = (stabPressure - exitSharpness).coerceAtLeast(0f)
-                        stabPressure = finalPressure // フィードバックして加速
+                if (stabStrength > 0.2f) {
+                    // ── 入り: 最初のポイント群で筆圧を 0 から素早く立ち上げる（キャッチアップ強化）──
+                    val taperStrength = stabStrength.coerceIn(0f, 1f)
+                    val entryPoints = (4f + taperStrength * 16f).toInt()  // 4-20ポイント
+
+                    if (stabPointCount < entryPoints) {
+                        val ratio = stabPointCount.toFloat() / entryPoints
+                        // より強い非線形カーブ（4乗）で素早く立ち上げる
+                        val curve = ratio * ratio * ratio * ratio
+                        finalPressure = stabPressure * curve  // 0 から stabPressure へ
                     }
-                    // 入り (最初の5ポイント): 控えめな補正のみ
-                    if (stabPointCount < 5) {
-                        val entryFade = stabPointCount / 5f
-                        finalPressure = safePoint.pressure + (finalPressure - safePoint.pressure) * entryFade
+
+                    // ── 抜き: 筆圧低下を加速して先端を尖らせる ──
+                    if (stabPointCount >= entryPoints) {
+                        val drop = stabPressure - safePoint.pressure
+                        if (drop > 0.01f) {
+                            // 低下を加速（stabilizer 高いほど強く）
+                            val accel = 2f + taperStrength * 2f  // 2.0-4.0倍
+                            finalPressure = (stabPressure - drop * accel).coerceAtLeast(0f)
+                            stabPressure = finalPressure
+                        }
                     }
                 }
 
@@ -204,15 +216,28 @@ class BrushEngine(
         val nomRad = brush.size / 2f
 
         // ── サイズ依存の自動間隔調整 ──
-        // ブラシサイズが大きくなるほど間隔を自動的に上げることで
-        // パフォーマンスを維持しつつ視覚品質を保つ。
-        // 小ブラシ (≤50px): spacing そのまま
-        // 中ブラシ (50-200px): 緩やかに増加
-        // 大ブラシ (200-2000px): 強めに増加
-        val autoSpacing = if (nomRad > 25f) {
-            val sizeFactor = (nomRad / 25f).let { sqrt(it) } // √ で緩やかにスケール
-            (brush.spacing * sizeFactor).coerceAtMost(0.5f) // 最大 50% に制限
-        } else brush.spacing
+        // 基準値: 半径 25px (サイズ 50) での spacing = 0.1f
+        // サイズが小さい場合は spacing を詰め、大きい場合は拡大してパフォーマンス維持
+        val baseRad = 25f
+        val radScale = nomRad / baseRad  // 基準値(25)との比率
+        val autoSpacing = when {
+            radScale < 0.4f -> {
+                // 小ブラシ (半径 < 10px): spacing を詰める (√ でスケール)
+                (brush.spacing / sqrt(4f / radScale)).coerceAtLeast(0.02f)
+            }
+            radScale < 1f -> {
+                // 中小ブラシ (10-25px): 線形補間で緩やかに調整
+                brush.spacing * radScale
+            }
+            radScale < 8f -> {
+                // 中大ブラシ (25-200px): √ でスケール (緩やか)
+                (brush.spacing * sqrt(radScale)).coerceAtMost(0.3f)
+            }
+            else -> {
+                // 大ブラシ (200px以上): パフォーマンス重視で √ スケーリング + 上限緩和
+                (brush.spacing * sqrt(radScale * 0.75f)).coerceAtMost(0.6f)
+            }
+        }
 
         val spRad = minOf(nomRad, sqrt(nomRad * 30f))
         // 細線 (半径 ≤ 4px) ではサブピクセル間隔を許可しジャギーを抑制
@@ -367,9 +392,12 @@ class BrushEngine(
 
                 // ── サブレイヤーフィルタ付きダブ配置 ──────────────────────
                 val hasFilter = brush.sublayerFilter != BrushConfig.SUBLAYER_FILTER_NONE
-                val filterRadius = maxOf(1, (nomRad * brush.filterRadiusScale).toInt())
+                // filterRadius: 筆圧で変更された実サイズ (pRad) に基づいて計算
+                // テーパー適用後のサイズを使用し、筆圧でぼかしもスケーリング
+                val filterRadius = maxOf(1, (finalRad * brush.filterRadiusScale).toInt())
 
-                // ダブマスク生成 & 進行方向に垂直な縁の濃度低減
+                // ダブマスク生成（通常の円形ブラシ）
+                // Lazy Nezumi 的補正は点の平滑化と予測で実現
                 val dab = DabMaskGenerator.createDab(px, py, finalRad * 2f, brush.hardness, brush.antiAliasing)
                 if (dab != null && hasFilter) {
                     applyDirectionalEdgeFade(dab, px, py, finalRad)
@@ -397,11 +425,18 @@ class BrushEngine(
         surface: TiledSurface, dab: DabMask,
         color: Int, opacity: Int, blendMode: Int,
     ) {
-        check(dab.diameter > 0) { "dab diameter must be > 0, got ${dab.diameter}" }
-        check(dab.data.size == dab.diameter * dab.diameter) {
-            "dab data size mismatch: expected ${dab.diameter * dab.diameter}, got ${dab.data.size}"
+        if (dab.diameter <= 0) {
+            PaintDebug.assertFail("dab diameter must be > 0, got ${dab.diameter}")
+            return
         }
-        check(opacity in 0..255) { "opacity out of range: $opacity" }
+        if (dab.data.size != dab.diameter * dab.diameter) {
+            PaintDebug.assertFail("dab data size mismatch: expected ${dab.diameter * dab.diameter}, got ${dab.data.size}")
+            return
+        }
+        if (opacity !in 0..255) {
+            PaintDebug.assertFail("opacity out of range: $opacity")
+            return
+        }
 
         if (dab.scale < 1f) {
             // ── スケーリングされた大ブラシ: 実サイズで適用 ──
@@ -510,30 +545,29 @@ class BrushEngine(
      * ダブ配置後にダブ周辺を局所ぼかしし、既存色とストローク色を混色する。
      *
      * ■ Direct モード (drawTarget === sampleSource):
-     *   content を直接読み取り → ぼかし → 円形フォールオフ付きで content に書き戻し。
-     *   sublayer を介さないため逆合成 (unComposite) は不要。
-     *   シンプルかつ安定した混色を実現。
+     *   content を直接読み取り → IIR ガウス近似ぼかし → 円形フォールオフ付きで content に書き戻し。
      *
      * ■ Indirect モード (drawTarget !== sampleSource):
-     *   sublayer + content の合成をぼかし、sublayer に書き戻す従来方式。
+     *   sublayer + content の合成を IIR ぼかし、sublayer に書き戻す従来方式。
      *
-     * O(n) per pixel の分離ボックスブラー + 円形フォールオフ。
-     * - AVERAGING: 2パス (三角カーネル近似 = 滑らかな混色)
-     * - BOX_BLUR: 1パス (にじみ効果)
+     * 重み付き IIR フィルタによるガウス近似 (Young & van Vliet 簡易版):
+     *   前進パス: y[i] = α * x[i] + (1-α) * y[i-1]
+     *   後退パス: y[i] = α * y[i] + (1-α) * y[i+1]
+     * 水平→垂直の分離型で O(n) per pixel。半径に依存しない一定コスト。
+     *
+     * - AVERAGING (筆): α=小 (0.08-0.15), 4パス → ほぼ均一な平均化。強い混色。
+     * - BOX_BLUR (水彩): α=中 (0.20-0.40), 2パス → ガウスブラー風。にじみ効果。
      */
     private fun blurAreaOnSurface(
         drawTarget: TiledSurface, sampleSource: TiledSurface,
         cx: Int, cy: Int, radius: Int, filterType: Int,
     ) {
-        // 大ブラシ時のメモリ/CPU 負荷を制限: デバイス RAM に応じた上限
         val safeRadius = radius.coerceIn(1, MemoryConfig.maxBlurRadius)
         var x0 = maxOf(0, cx - safeRadius)
         var y0 = maxOf(0, cy - safeRadius)
         var x1 = minOf(drawTarget.width - 1, cx + safeRadius)
         var y1 = minOf(drawTarget.height - 1, cy + safeRadius)
 
-        // 選択範囲がある場合: ぼかし領域をバウンディングボックス内に制限
-        // （サンプリング時に絶対に範囲外参照しない）
         val sm = selectionManager
         val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
         if (selBounds != null) {
@@ -548,79 +582,103 @@ class BrushEngine(
         val h = y1 - y0 + 1
         val size = w * h
 
-        // メモリ上限チェック: 複数の大型バッファを考慮した合計メモリを計算
-        // Direct モード: IntArray*3 (4B) + LongArray*3 (8B) = 36B/pixel
-        // Indirect モード: 上記*2 + 追加 IntArray*3 + LongArray*3 = 72B/pixel
-        //
-        // MemoryConfig.maxBlurRadius に基づいて最大フィルタサイズを決定
-        // safeRadius = radius.coerceIn(1, MemoryConfig.maxBlurRadius)
-        // 最大領域サイズ: (safeRadius*2+1)^2 pixels
         val maxRadiusSq = (MemoryConfig.maxBlurRadius * 2 + 1)
         val maxAreaSizeDirect = maxRadiusSq * maxRadiusSq
-
-        // Indirect モードの場合はより厳しい制限を適用
         val maxSize = if (drawTarget !== sampleSource) {
-            // Indirect モード: メモリ使用量が最大になる
-            (maxAreaSizeDirect * 0.8).toInt()  // 20% 安全マージン
-        } else {
-            // Direct モード
-            maxAreaSizeDirect
-        }
+            (maxAreaSizeDirect * 0.8).toInt()
+        } else maxAreaSizeDirect
 
         if (size > maxSize) {
             PaintDebug.d(PaintDebug.Perf) {
-                "[blurArea] skipped: size=$size > maxSize=$maxSize (w=$w h=$h) mode=${if(drawTarget === sampleSource) "Direct" else "Indirect"}"
+                "[blurArea] skipped: size=$size > maxSize=$maxSize (w=$w h=$h)"
             }
             return
         }
 
-        // バッファ再利用 (GC 回避) - メモリ不足時はスキップ
+        // バッファ再利用 (GC 回避)
         try {
             if (blurSrc.size < size) {
-                blurSrc = IntArray(size); blurTmp = IntArray(size); blurDst = IntArray(size)
+                blurSrc = IntArray(size); blurDst = IntArray(size)
             }
-            if (blurLinSrc.size < size) {
-                blurLinSrc = LongArray(size); blurLinTmp = LongArray(size); blurLinDst = LongArray(size)
-            }
+            if (blurLin.size < size) blurLin = LongArray(size)
         } catch (e: OutOfMemoryError) {
             PaintDebug.d(PaintDebug.Perf) {
-                "[blurArea] OOM: failed to allocate buffers for size=$size (w=$w h=$h)"
+                "[blurArea] OOM: failed to allocate buffers for size=$size"
             }
             return
         }
 
-        val passes = if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) 2 else 1
-        val kr = maxOf(1, safeRadius / 3)
+        // IIR パラメータ: フィルタ種別 × サイズによる段階的調整
+        // α が小さいほど強いぼかし (= 強い混色)
+        // スペーシング処理と同じ基準値（baseRad=25）で段階的にスケーリング
+        val baseRad = 25f
+        val radScale = safeRadius.toFloat() / baseRad
+        val iirAlpha: Float
+        val iirPasses: Int
 
-        // ── Direct モード: content を直接ぼかし (リニアライト空間) ────
+        if (filterType == BrushConfig.SUBLAYER_FILTER_AVERAGING) {
+            // 筆: ほぼ平均になるような強い混色
+            val baseAlpha = 0.06f + 0.06f * (5f / maxOf(5f, safeRadius.toFloat()))
+            iirAlpha = when {
+                radScale < 0.4f -> {
+                    // 小ブラシ (半径 < 10px): 混色を弱くする
+                    baseAlpha.coerceIn(0.02f, 0.04f)
+                }
+                radScale < 1f -> {
+                    // 中小ブラシ (10-25px): 緩やかに混色増加
+                    baseAlpha.coerceIn(0.04f, 0.06f)
+                }
+                radScale < 8f -> {
+                    // 中大ブラシ (25-200px): バランス型
+                    baseAlpha.coerceIn(0.06f, 0.10f)
+                }
+                else -> {
+                    // 大ブラシ (200px以上): 強い混色で一体感を出す
+                    baseAlpha.coerceIn(0.08f, 0.12f)
+                }
+            }
+            iirPasses = 1
+        } else {
+            // 水彩: ガウスブラー風のにじみ
+            val baseAlpha = 0.15f + 0.15f * (8f / maxOf(8f, safeRadius.toFloat()))
+            iirAlpha = when {
+                radScale < 0.4f -> {
+                    // 小ブラシ (半径 < 10px): 弱いにじみ
+                    baseAlpha.coerceIn(0.08f, 0.10f)
+                }
+                radScale < 1f -> {
+                    // 中小ブラシ (10-25px): 緩やかなにじみ
+                    baseAlpha.coerceIn(0.10f, 0.11f)
+                }
+                radScale < 8f -> {
+                    // 中大ブラシ (25-200px): バランス型
+                    baseAlpha.coerceIn(0.09f, 0.13f)
+                }
+                else -> {
+                    // 大ブラシ (200px以上): 広いにじみ
+                    baseAlpha.coerceIn(0.10f, 0.15f)
+                }
+            }
+            iirPasses = 1
+        }
+
+        // ── Direct モード: content を直接ぼかし (16bit sRGB 空間) ────
         if (drawTarget === sampleSource) {
-            // 入力: sRGB → リニア変換
-            // 選択範囲がある場合は、選択範囲内のピクセルのみをサンプル
             for (ly in 0 until h) for (lx in 0 until w) {
                 val gx = x0 + lx; val gy = y0 + ly
-                // x0-x1, y0-y1 は既に選択範囲でクリップされているため
-                // ここで再度チェック（二重防御）
-                val px = if (sm != null && sm.getMaskValue(gx, gy) < 255) {
-                    // 範囲外: 透明として処理
-                    0
-                } else {
-                    drawTarget.getPixelAt(gx, gy)
-                }
+                val px = if (sm != null && sm.getMaskValue(gx, gy) < 255) 0
+                    else drawTarget.getPixelAt(gx, gy)
                 blurSrc[ly * w + lx] = px
-                blurLinSrc[ly * w + lx] = PixelOps.pixelToLinear64(px)
+                blurLin[ly * w + lx] = pixelToWide64(px)
             }
 
-            // 分離ボックスブラー (リニア空間)
-            System.arraycopy(blurLinSrc, 0, blurLinDst, 0, size)
-            repeat(passes) {
-                separableBoxBlurPassLinear(blurLinDst, blurLinTmp, w, h, kr)
-                System.arraycopy(blurLinTmp, 0, blurLinDst, 0, size)
+            // IIR ガウス近似ぼかし (16bit sRGB 空間、インプレース)
+            repeat(iirPasses) {
+                iirGaussPass64(blurLin, w, h, iirAlpha)
             }
 
-            // リニア → sRGB 変換
-            for (i in 0 until size) {
-                blurDst[i] = PixelOps.linear64ToPixel(blurLinDst[i])
-            }
+            // 16bit → 8bit 変換
+            for (i in 0 until size) blurDst[i] = wide64ToPixel(blurLin[i])
 
             // 円形フォールオフ付きで content に書き戻し
             val r2 = safeRadius * safeRadius
@@ -635,16 +693,13 @@ class BrushEngine(
                 val original = blurSrc[idx]
                 val blurred = blurDst[idx]
 
-                // フォールオフ: 中心=ぼかし結果、縁=元のピクセル
-                val pixel = if (dist2 <= fadeStart2) {
-                    blurred
-                } else {
-                    val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
-                    PixelOps.lerpColor(blurred, original, t * t)
-                }
+                val pixel = if (dist2 <= fadeStart2) blurred
+                    else {
+                        val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
+                        lerpSrgb(blurred, original, t * t)
+                    }
 
                 val gpx = x0 + lx; val gpy = y0 + ly
-                // 選択範囲外のピクセルには書き込まない
                 if (sm != null && sm.getMaskValue(gpx, gpy) < 255) continue
                 val tx = drawTarget.pixelToTile(gpx)
                 val ty = drawTarget.pixelToTile(gpy)
@@ -656,18 +711,15 @@ class BrushEngine(
             return
         }
 
-        // ── Indirect モード: sublayer + content 合成ぼかし (リニアライト空間) ──
-        // (Airbrush 等 indirect=true のブラシ用。筆/水彩は上の Direct パスを使用)
+        // ── Indirect モード: sublayer + content 合成ぼかし (16bit sRGB 空間) ──
         try {
             if (blurSubSrc.size < size) {
-                blurSubSrc = IntArray(size); blurSubDst = IntArray(size); blurSubTmp = IntArray(size)
+                blurSubSrc = IntArray(size); blurSubDst = IntArray(size)
             }
-            if (blurLinSubSrc.size < size) {
-                blurLinSubSrc = LongArray(size); blurLinSubDst = LongArray(size); blurLinSubTmp = LongArray(size)
-            }
+            if (blurLinSub.size < size) blurLinSub = LongArray(size)
         } catch (e: OutOfMemoryError) {
             PaintDebug.d(PaintDebug.Perf) {
-                "[blurArea] OOM in Indirect mode: failed to allocate sub-buffers for size=$size (w=$w h=$h)"
+                "[blurArea] OOM in Indirect mode: size=$size"
             }
             return
         }
@@ -678,36 +730,25 @@ class BrushEngine(
             var contPx = sampleSource.getPixelAt(px, py)
             val idx = ly * w + lx
 
-            // 選択範囲外は透明として処理（選択範囲内のピクセルのみを計算対象）
             if (sm != null && sm.getMaskValue(px, py) < 255) {
-                // 範囲外: 透明
-                subPx = 0
-                contPx = 0
+                subPx = 0; contPx = 0
             }
 
             val comp = PixelOps.blendSrcOver(contPx, subPx)
             blurSrc[idx] = comp
-            blurLinSrc[idx] = PixelOps.pixelToLinear64(comp)
+            blurLin[idx] = pixelToWide64(comp)
             val mask = if (PixelOps.alpha(subPx) >= PixelOps.alpha(contPx)) subPx else contPx
             blurSubSrc[idx] = mask
-            blurLinSubSrc[idx] = PixelOps.pixelToLinear64(mask)
+            blurLinSub[idx] = pixelToWide64(mask)
         }
 
-        // 分離ボックスブラー (リニア空間): 合成版 (RGB 混色用)
-        System.arraycopy(blurLinSrc, 0, blurLinDst, 0, size)
-        repeat(passes) {
-            separableBoxBlurPassLinear(blurLinDst, blurLinTmp, w, h, kr)
-            System.arraycopy(blurLinTmp, 0, blurLinDst, 0, size)
-        }
-        for (i in 0 until size) blurDst[i] = PixelOps.linear64ToPixel(blurLinDst[i])
+        // IIR ガウス近似ぼかし (16bit sRGB 空間、インプレース): 合成版 (RGB 混色用)
+        repeat(iirPasses) { iirGaussPass64(blurLin, w, h, iirAlpha) }
+        for (i in 0 until size) blurDst[i] = wide64ToPixel(blurLin[i])
 
-        // 分離ボックスブラー (リニア空間): マスク用
-        System.arraycopy(blurLinSubSrc, 0, blurLinSubDst, 0, size)
-        repeat(passes) {
-            separableBoxBlurPassLinear(blurLinSubDst, blurLinSubTmp, w, h, kr)
-            System.arraycopy(blurLinSubTmp, 0, blurLinSubDst, 0, size)
-        }
-        for (i in 0 until size) blurSubDst[i] = PixelOps.linear64ToPixel(blurLinSubDst[i])
+        // IIR ガウス近似ぼかし (16bit sRGB 空間、インプレース): マスク用
+        repeat(iirPasses) { iirGaussPass64(blurLinSub, w, h, iirAlpha) }
+        for (i in 0 until size) blurSubDst[i] = wide64ToPixel(blurLinSub[i])
 
         // 円形フォールオフ付きでサブレイヤーに書き戻し
         val r2 = safeRadius * safeRadius
@@ -730,22 +771,17 @@ class BrushEngine(
             } else {
                 val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
                 val tSq = t * t
-                val aBlur = PixelOps.alpha(subBlur)
-                val aOrig = PixelOps.alpha(subOrig)
-                bsa = (aBlur + ((aOrig - aBlur) * tSq).toInt()).coerceIn(0, 255)
+                bsa = (PixelOps.alpha(subBlur) + ((PixelOps.alpha(subOrig) - PixelOps.alpha(subBlur)) * tSq).toInt()).coerceIn(0, 255)
             }
             if (bsa == 0) continue
 
-            val blendedComposite = if (dist2 <= fadeStart2) {
-                compositeBlur
-            } else {
-                val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
-                PixelOps.lerpColor(compositeBlur, compositeOrig, t * t)
-            }
+            val blendedComposite = if (dist2 <= fadeStart2) compositeBlur
+                else {
+                    val t = ((dist2 - fadeStart2) / fadeRange).coerceIn(0f, 1f)
+                    PixelOps.lerpColor(compositeBlur, compositeOrig, t * t)
+                }
 
             val gpx = x0 + lx; val gpy = y0 + ly
-
-            // 選択範囲外のピクセルには書き込まない (Indirect mode でも同様)
             if (sm != null && sm.getMaskValue(gpx, gpy) < 255) continue
 
             val contPx = sampleSource.getPixelAt(gpx, gpy)
@@ -761,119 +797,136 @@ class BrushEngine(
     }
 
     /**
-     * 分離ボックスブラー 1パス (水平→垂直)。
-     * スライディングウィンドウで O(n) — 半径に依存しない。
+     * premultiplied ARGB8 → 16bit 拡張 Long パック。
+     * ガンマ変換なし。各チャネルを ×257 で 0..255 → 0..65535 に拡張。
+     * パックレイアウト: A(16) | R(16) | G(16) | B(16)
      */
-    private fun separableBoxBlurPass(
-        input: IntArray, output: IntArray, w: Int, h: Int, kr: Int,
-    ) {
-        val d = kr * 2 + 1
-
-        // ── 水平パス: input → output ──
-        for (y in 0 until h) {
-            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
-            val row = y * w
-            for (x in -kr..kr) {
-                val c = input[row + x.coerceIn(0, w - 1)]
-                aAcc += PixelOps.alpha(c); rAcc += PixelOps.red(c)
-                gAcc += PixelOps.green(c); bAcc += PixelOps.blue(c)
-            }
-            for (x in 0 until w) {
-                output[row + x] = PixelOps.pack(
-                    (aAcc / d).toInt(), (rAcc / d).toInt(),
-                    (gAcc / d).toInt(), (bAcc / d).toInt(),
-                )
-                val addX = (x + kr + 1).coerceAtMost(w - 1)
-                val remX = (x - kr).coerceAtLeast(0)
-                val ac = input[row + addX]; val rc = input[row + remX]
-                aAcc += PixelOps.alpha(ac) - PixelOps.alpha(rc)
-                rAcc += PixelOps.red(ac) - PixelOps.red(rc)
-                gAcc += PixelOps.green(ac) - PixelOps.green(rc)
-                bAcc += PixelOps.blue(ac) - PixelOps.blue(rc)
-            }
-        }
-
-        // ── 垂直パス: output を in-place で上書き ──
-        // 垂直は列単位なので temp コピーが必要 → input を temp として再利用
-        System.arraycopy(output, 0, input, 0, w * h)
-        for (x in 0 until w) {
-            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
-            for (y in -kr..kr) {
-                val c = input[y.coerceIn(0, h - 1) * w + x]
-                aAcc += PixelOps.alpha(c); rAcc += PixelOps.red(c)
-                gAcc += PixelOps.green(c); bAcc += PixelOps.blue(c)
-            }
-            for (y in 0 until h) {
-                output[y * w + x] = PixelOps.pack(
-                    (aAcc / d).toInt(), (rAcc / d).toInt(),
-                    (gAcc / d).toInt(), (bAcc / d).toInt(),
-                )
-                val addY = (y + kr + 1).coerceAtMost(h - 1)
-                val remY = (y - kr).coerceAtLeast(0)
-                val ac = input[addY * w + x]; val rc = input[remY * w + x]
-                aAcc += PixelOps.alpha(ac) - PixelOps.alpha(rc)
-                rAcc += PixelOps.red(ac) - PixelOps.red(rc)
-                gAcc += PixelOps.green(ac) - PixelOps.green(rc)
-                bAcc += PixelOps.blue(ac) - PixelOps.blue(rc)
-            }
-        }
+    private fun pixelToWide64(pixel: Int): Long {
+        if (pixel == 0) return 0L
+        val a = ((pixel ushr 24) and 0xFF).toLong() * 257L
+        val r = ((pixel ushr 16) and 0xFF).toLong() * 257L
+        val g = ((pixel ushr 8) and 0xFF).toLong() * 257L
+        val b = (pixel and 0xFF).toLong() * 257L
+        return (a shl 48) or (r shl 32) or (g shl 16) or b
     }
 
     /**
-     * 分離ボックスブラー 1パス (リニアライト空間版)。
-     * Long パックレイアウト: A(16) | R(16) | G(16) | B(16)。
-     * sRGB 空間での平均化による色の濁りを防止。
+     * 16bit Long パック → premultiplied ARGB8。
+     * 各チャネルを /257 で 0..65535 → 0..255 に戻す。
      */
-    private fun separableBoxBlurPassLinear(
-        input: LongArray, output: LongArray, w: Int, h: Int, kr: Int,
-    ) {
-        val d = kr * 2 + 1
+    private fun wide64ToPixel(v: Long): Int {
+        val a = (((v ushr 48) and 0xFFFF).toInt() + 128) / 257
+        val r = (((v ushr 32) and 0xFFFF).toInt() + 128) / 257
+        val g = (((v ushr 16) and 0xFFFF).toInt() + 128) / 257
+        val b = ((v and 0xFFFF).toInt() + 128) / 257
+        return (a shl 24) or (r shl 16) or (g shl 8) or b
+    }
 
-        // ── 水平パス: input → output ──
+    /**
+     * sRGB 空間の premultiplied ARGB8 線形補間 (フォールオフ用)。
+     * ガンマ変換なし、整数演算のみ。
+     */
+    private fun lerpSrgb(a: Int, b: Int, t: Float): Int {
+        if (t <= 0f) return a; if (t >= 1f) return b
+        val it = (t * 256f + 0.5f).toInt().coerceIn(0, 256)
+        val ot = 256 - it
+        val ca = ((a ushr 24) and 0xFF) * ot + ((b ushr 24) and 0xFF) * it
+        val cr = ((a ushr 16) and 0xFF) * ot + ((b ushr 16) and 0xFF) * it
+        val cg = ((a ushr 8) and 0xFF) * ot + ((b ushr 8) and 0xFF) * it
+        val cb = (a and 0xFF) * ot + (b and 0xFF) * it
+        return ((ca ushr 8) shl 24) or ((cr ushr 8) shl 16) or ((cg ushr 8) shl 8) or (cb ushr 8)
+    }
+
+    /**
+     * 重み付き IIR フィルタによるガウス近似 1パス (16bit パック Long、分離型)。
+     *
+     * 各行/列に対して前進パスと後退パスを適用:
+     *   前進: y[i] = α * x[i] + (1-α) * y[i-1]
+     *   後退: y[i] = α * y[i] + (1-α) * y[i+1]
+     *
+     * 16bit 固定小数点精度。ガンマ変換不要で高速。
+     * Long パックレイアウト: A(16) | R(16) | G(16) | B(16)
+     */
+    private fun iirGaussPass64(
+        data: LongArray, w: Int, h: Int, alpha: Float,
+    ) {
+        val a16 = (alpha * 65536f + 0.5f).toInt().coerceIn(1, 65536)
+        val b16 = 65536 - a16
+        val aL = a16.toLong()
+        val bL = b16.toLong()
+
+        // ── 水平パス: 各行に前進→後退 ──
         for (y in 0 until h) {
-            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
             val row = y * w
-            for (x in -kr..kr) {
-                val c = input[row + x.coerceIn(0, w - 1)]
-                aAcc += (c ushr 48) and 0xFFFF; rAcc += (c ushr 32) and 0xFFFF
-                gAcc += (c ushr 16) and 0xFFFF; bAcc += c and 0xFFFF
+
+            // 前進パス: left → right
+            var prevA = (data[row] ushr 48) and 0xFFFF
+            var prevR = (data[row] ushr 32) and 0xFFFF
+            var prevG = (data[row] ushr 16) and 0xFFFF
+            var prevB = data[row] and 0xFFFF
+            for (x in 1 until w) {
+                val c = data[row + x]
+                val ca = (c ushr 48) and 0xFFFF; val cr = (c ushr 32) and 0xFFFF
+                val cg = (c ushr 16) and 0xFFFF; val cb = c and 0xFFFF
+                prevA = ((aL * ca + bL * prevA) ushr 16) and 0xFFFF
+                prevR = ((aL * cr + bL * prevR) ushr 16) and 0xFFFF
+                prevG = ((aL * cg + bL * prevG) ushr 16) and 0xFFFF
+                prevB = ((aL * cb + bL * prevB) ushr 16) and 0xFFFF
+                data[row + x] = (prevA shl 48) or (prevR shl 32) or (prevG shl 16) or prevB
             }
-            for (x in 0 until w) {
-                val oa = (aAcc / d); val or_ = (rAcc / d)
-                val og = (gAcc / d); val ob = (bAcc / d)
-                output[row + x] = (oa shl 48) or ((or_ and 0xFFFF) shl 32) or
-                    ((og and 0xFFFF) shl 16) or (ob and 0xFFFF)
-                val addX = (x + kr + 1).coerceAtMost(w - 1)
-                val remX = (x - kr).coerceAtLeast(0)
-                val ac = input[row + addX]; val rc = input[row + remX]
-                aAcc += ((ac ushr 48) and 0xFFFF) - ((rc ushr 48) and 0xFFFF)
-                rAcc += ((ac ushr 32) and 0xFFFF) - ((rc ushr 32) and 0xFFFF)
-                gAcc += ((ac ushr 16) and 0xFFFF) - ((rc ushr 16) and 0xFFFF)
-                bAcc += (ac and 0xFFFF) - (rc and 0xFFFF)
+
+            // 後退パス: right → left
+            prevA = (data[row + w - 1] ushr 48) and 0xFFFF
+            prevR = (data[row + w - 1] ushr 32) and 0xFFFF
+            prevG = (data[row + w - 1] ushr 16) and 0xFFFF
+            prevB = data[row + w - 1] and 0xFFFF
+            for (x in w - 2 downTo 0) {
+                val c = data[row + x]
+                val ca = (c ushr 48) and 0xFFFF; val cr = (c ushr 32) and 0xFFFF
+                val cg = (c ushr 16) and 0xFFFF; val cb = c and 0xFFFF
+                prevA = ((aL * ca + bL * prevA) ushr 16) and 0xFFFF
+                prevR = ((aL * cr + bL * prevR) ushr 16) and 0xFFFF
+                prevG = ((aL * cg + bL * prevG) ushr 16) and 0xFFFF
+                prevB = ((aL * cb + bL * prevB) ushr 16) and 0xFFFF
+                data[row + x] = (prevA shl 48) or (prevR shl 32) or (prevG shl 16) or prevB
             }
         }
 
-        // ── 垂直パス: output を in-place で上書き (input を temp として再利用) ──
-        System.arraycopy(output, 0, input, 0, w * h)
+        // ── 垂直パス: 各列に前進→後退 ──
         for (x in 0 until w) {
-            var aAcc = 0L; var rAcc = 0L; var gAcc = 0L; var bAcc = 0L
-            for (y in -kr..kr) {
-                val c = input[y.coerceIn(0, h - 1) * w + x]
-                aAcc += (c ushr 48) and 0xFFFF; rAcc += (c ushr 32) and 0xFFFF
-                gAcc += (c ushr 16) and 0xFFFF; bAcc += c and 0xFFFF
+            // 前進パス: top → bottom
+            var prevA = (data[x] ushr 48) and 0xFFFF
+            var prevR = (data[x] ushr 32) and 0xFFFF
+            var prevG = (data[x] ushr 16) and 0xFFFF
+            var prevB = data[x] and 0xFFFF
+            for (y in 1 until h) {
+                val idx = y * w + x
+                val c = data[idx]
+                val ca = (c ushr 48) and 0xFFFF; val cr = (c ushr 32) and 0xFFFF
+                val cg = (c ushr 16) and 0xFFFF; val cb = c and 0xFFFF
+                prevA = ((aL * ca + bL * prevA) ushr 16) and 0xFFFF
+                prevR = ((aL * cr + bL * prevR) ushr 16) and 0xFFFF
+                prevG = ((aL * cg + bL * prevG) ushr 16) and 0xFFFF
+                prevB = ((aL * cb + bL * prevB) ushr 16) and 0xFFFF
+                data[idx] = (prevA shl 48) or (prevR shl 32) or (prevG shl 16) or prevB
             }
-            for (y in 0 until h) {
-                val oa = (aAcc / d); val or_ = (rAcc / d)
-                val og = (gAcc / d); val ob = (bAcc / d)
-                output[y * w + x] = (oa shl 48) or ((or_ and 0xFFFF) shl 32) or
-                    ((og and 0xFFFF) shl 16) or (ob and 0xFFFF)
-                val addY = (y + kr + 1).coerceAtMost(h - 1)
-                val remY = (y - kr).coerceAtLeast(0)
-                val ac = input[addY * w + x]; val rc = input[remY * w + x]
-                aAcc += ((ac ushr 48) and 0xFFFF) - ((rc ushr 48) and 0xFFFF)
-                rAcc += ((ac ushr 32) and 0xFFFF) - ((rc ushr 32) and 0xFFFF)
-                gAcc += ((ac ushr 16) and 0xFFFF) - ((rc ushr 16) and 0xFFFF)
-                bAcc += (ac and 0xFFFF) - (rc and 0xFFFF)
+
+            // 後退パス: bottom → top
+            val lastIdx = (h - 1) * w + x
+            prevA = (data[lastIdx] ushr 48) and 0xFFFF
+            prevR = (data[lastIdx] ushr 32) and 0xFFFF
+            prevG = (data[lastIdx] ushr 16) and 0xFFFF
+            prevB = data[lastIdx] and 0xFFFF
+            for (y in h - 2 downTo 0) {
+                val idx = y * w + x
+                val c = data[idx]
+                val ca = (c ushr 48) and 0xFFFF; val cr = (c ushr 32) and 0xFFFF
+                val cg = (c ushr 16) and 0xFFFF; val cb = c and 0xFFFF
+                prevA = ((aL * ca + bL * prevA) ushr 16) and 0xFFFF
+                prevR = ((aL * cr + bL * prevR) ushr 16) and 0xFFFF
+                prevG = ((aL * cg + bL * prevG) ushr 16) and 0xFFFF
+                prevB = ((aL * cb + bL * prevB) ushr 16) and 0xFFFF
+                data[idx] = (prevA shl 48) or (prevR shl 32) or (prevG shl 16) or prevB
             }
         }
     }

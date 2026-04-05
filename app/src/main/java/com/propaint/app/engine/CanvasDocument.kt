@@ -68,6 +68,9 @@ class CanvasDocument(val width: Int, val height: Int) {
     // フィルタープレビュー
     private var filterPreviewLayerId: Int = -1
     private var filterPreviewSnapshot: Map<Int, Tile?>? = null
+    /** フィルタープレビュー用再利用バッファ (スライダー操作中のアロケーション回避) */
+    private var filterPreviewBuf: IntArray? = null
+    private var filterPreviewBuf2: IntArray? = null
 
     // ストローク中フラグ
     private var strokeInProgress = false
@@ -75,10 +78,20 @@ class CanvasDocument(val width: Int, val height: Int) {
     /** サブレイヤープレビュー用: ストローク中の brush.opacity (GL スレッドから参照) */
     @Volatile var strokeOpacity: Float = 1f; private set
 
-    // 合成キャッシュ
+    // 合成キャッシュ (ダブルバッファ)
+    // backBuffer: エンジンスレッド (lock 内) が書き込む
+    // frontBuffer: GL スレッドが読み取る (compositeCache として公開)
+    // swapCompositeTile() で dirty タイルのみ back→front にコピーする
     private val tilesX get() = (width + Tile.SIZE - 1) / Tile.SIZE
     private val tilesY get() = (height + Tile.SIZE - 1) / Tile.SIZE
-    val compositeCache: Array<IntArray?> = arrayOfNulls(tilesX * tilesY)
+    private val backBuffer: Array<IntArray?> = arrayOfNulls(tilesX * tilesY)
+    private val frontBuffer: Array<IntArray?> = arrayOfNulls(tilesX * tilesY)
+
+    /** GL スレッドが参照する合成済みタイルキャッシュ (読み取り専用) */
+    val compositeCache: Array<IntArray?> get() = frontBuffer
+
+    /** rebuildCompositeTile 内のサブレイヤー合成用 scratch buffer (GC 回避) */
+    private val compositeScratch = IntArray(Tile.LENGTH)
 
     init { addLayer("レイヤー 1") }
 
@@ -215,31 +228,44 @@ class CanvasDocument(val width: Int, val height: Int) {
         PaintDebug.d(PaintDebug.Layer) { "[translateLayerContent] layerId=$id dx=$dx dy=$dy" }
         pushUndoTileDelta(layer)
 
-        // 元ピクセルを取得 → クリア → オフセットして書き戻し
-        val src = layer.content.toPixelArray()
+        // COW スナップショットからタイル単位で読み取り、オフセットして書き戻す
+        // toPixelArray() の width*height*4 バイト割り当てを回避
+        val snapshot = layer.content.snapshot()
         layer.content.clear()
         val w = width; val h = height
-        for (sy in 0 until h) {
-            val dstY = sy + dy
-            if (dstY < 0 || dstY >= h) continue
-            for (sx in 0 until w) {
-                val dstX = sx + dx
-                if (dstX < 0 || dstX >= w) continue
-                val pixel = src[sy * w + sx]
-                if (pixel == 0) continue
-                val tx = dstX / Tile.SIZE; val ty = dstY / Tile.SIZE
-                val tile = layer.content.getOrCreateMutable(tx, ty)
-                val lx = dstX - tx * Tile.SIZE; val ly = dstY - ty * Tile.SIZE
-                tile.pixels[ly * Tile.SIZE + lx] = pixel
+        for (sty in 0 until snapshot.tilesY) {
+            for (stx in 0 until snapshot.tilesX) {
+                val srcTile = snapshot.getTile(stx, sty) ?: continue
+                val baseSrcX = stx * Tile.SIZE
+                val baseSrcY = sty * Tile.SIZE
+                for (ly in 0 until Tile.SIZE) {
+                    val srcY = baseSrcY + ly
+                    if (srcY >= h) break
+                    val dstY = srcY + dy
+                    if (dstY < 0 || dstY >= h) continue
+                    for (lx in 0 until Tile.SIZE) {
+                        val srcX = baseSrcX + lx
+                        if (srcX >= w) break
+                        val pixel = srcTile.pixels[ly * Tile.SIZE + lx]
+                        if (pixel == 0) continue
+                        val dstX = srcX + dx
+                        if (dstX < 0 || dstX >= w) continue
+                        val dtx = dstX / Tile.SIZE; val dty = dstY / Tile.SIZE
+                        val tile = layer.content.getOrCreateMutable(dtx, dty)
+                        val dlx = dstX - dtx * Tile.SIZE; val dly = dstY - dty * Tile.SIZE
+                        tile.pixels[dly * Tile.SIZE + dlx] = pixel
+                    }
+                }
             }
         }
+        snapshot.clear() // COW 参照を解放
         dirtyTracker.markFullRebuild()
     }
 
     // ── 描画操作 ────────────────────────────────────────────────────
 
     /** 選択マスクが有効な場合のストローク前スナップショット (選択範囲外の復元用) */
-    private var _strokeSelSnapshot: IntArray? = null
+    private var _strokeSelSnapshot: TiledSurface? = null
 
     fun beginStroke(brush: BrushConfig) = lock.withLock {
         val layer = getActiveLayer() ?: return
@@ -253,9 +279,9 @@ class CanvasDocument(val width: Int, val height: Int) {
 
         pushUndoTileDelta(layer)
 
-        // 選択マスクが有効な場合: ストローク前の状態をスナップショット
+        // 選択マスクが有効な場合: COW スナップショット (タイル参照の incRef のみ、64MB コピー不要)
         _strokeSelSnapshot = if (selectionManager.hasSelection) {
-            layer.content.toPixelArray()
+            layer.content.snapshot()
         } else null
 
         // BrushEngine にストローク開始レイヤーを記録
@@ -311,8 +337,9 @@ class CanvasDocument(val width: Int, val height: Int) {
             // 選択マスクが有効な場合: 選択範囲外のピクセルを元に戻す
             val snap = _strokeSelSnapshot
             if (snap != null && selectionManager.hasSelection) {
-                restoreOutsideSelection(layer.content, snap)
+                restoreOutsideSelectionFromSurface(layer.content, snap)
             }
+            _strokeSelSnapshot?.clear() // COW 参照を解放
             _strokeSelSnapshot = null
         }
         // COW 参照を解放してからクリア
@@ -333,21 +360,33 @@ class CanvasDocument(val width: Int, val height: Int) {
         if (layer != null) {
             val sub = layer.sublayer
             if (sub != null) {
+                // 選択マスクが有効な場合: サブレイヤーの選択範囲外ピクセルを除去してから合成
+                if (selectionManager.hasSelection) {
+                    maskSublayerWithSelection(sub)
+                }
                 compositeTwoLayers(layer.content, sub, brush.opacity, PixelOps.BLEND_NORMAL)
                 layer.sublayer = null
             }
+            // 選択マスクが有効な場合: 選択範囲外のピクセルを元に戻す
+            val snap = _strokeSelSnapshot
+            if (snap != null && selectionManager.hasSelection) {
+                restoreOutsideSelectionFromSurface(layer.content, snap)
+            }
         }
+        _strokeSelSnapshot?.clear() // COW 参照を解放
+        _strokeSelSnapshot = null
     }
 
     // ── スポイト (Eyedropper) ────────────────────────────────────────
 
     /** 合成済みキャンバスから色をサンプリング (メインスレッドから呼ばれる) */
     fun eyedropperAt(px: Int, py: Int): Int = lock.withLock {
-        rebuildCompositeCache()
         if (px < 0 || px >= width || py < 0 || py >= height) return 0xFF000000.toInt()
         val tx = px / Tile.SIZE; val ty = py / Tile.SIZE
         val idx = ty * tilesX + tx
-        val data = compositeCache[idx] ?: return 0xFFFFFFFF.toInt()
+        // 1タイルだけ再合成 (全タイル再構築は不要)
+        rebuildCompositeTile(tx, ty, idx)
+        val data = backBuffer[idx] ?: return 0xFFFFFFFF.toInt()
         val lx = px - tx * Tile.SIZE; val ly = py - ty * Tile.SIZE
         return data[ly * Tile.SIZE + lx]
     }
@@ -360,9 +399,28 @@ class CanvasDocument(val width: Int, val height: Int) {
         }
     }
 
+    /**
+     * backBuffer → frontBuffer にタイルデータをコピーする。
+     * GL スレッドの onDrawFrame から呼ばれ、合成直後のタイルを
+     * GL テクスチャアップロード用に安全に公開する。
+     */
+    fun publishCompositeTile(cacheIdx: Int) {
+        val src = backBuffer[cacheIdx] ?: return
+        val dst = frontBuffer[cacheIdx]
+            ?: IntArray(Tile.LENGTH).also { frontBuffer[cacheIdx] = it }
+        System.arraycopy(src, 0, dst, 0, Tile.LENGTH)
+    }
+
+    /** 全タイルを一括で publish (fullRebuild 時用) */
+    fun publishAllCompositeTiles() {
+        for (i in backBuffer.indices) {
+            publishCompositeTile(i)
+        }
+    }
+
     fun rebuildCompositeTile(tx: Int, ty: Int, cacheIdx: Int) {
-        val result = compositeCache[cacheIdx]
-            ?: IntArray(Tile.LENGTH).also { compositeCache[cacheIdx] = it }
+        val result = backBuffer[cacheIdx]
+            ?: IntArray(Tile.LENGTH).also { backBuffer[cacheIdx] = it }
         result.fill(0xFFFFFFFF.toInt())
 
         // クリッピング用ベースタイル追跡
@@ -416,19 +474,21 @@ class CanvasDocument(val width: Int, val height: Int) {
             // サブレイヤープレビューには strokeOpacity を適用
             // (endStroke で brush.opacity で合成されるのと一致させる)
             val subOp255 = (strokeOpacity * 255f).toInt().coerceIn(0, 255)
+            // scratch buffer を再利用して GC 圧力を削減
+            // (rebuildCompositeTile は lock 内で単一スレッドからのみ呼ばれる)
             val srcPixels: IntArray = when {
                 mainTile != null && subTile != null -> {
-                    mainTile.pixels.copyOf().also {
-                        PixelOps.compositeLayer(it, subTile.pixels, subOp255, PixelOps.BLEND_NORMAL)
-                    }
+                    System.arraycopy(mainTile.pixels, 0, compositeScratch, 0, Tile.LENGTH)
+                    PixelOps.compositeLayer(compositeScratch, subTile.pixels, subOp255, PixelOps.BLEND_NORMAL)
+                    compositeScratch
                 }
                 subTile != null -> {
                     if (subOp255 >= 255) subTile.pixels
                     else {
                         // サブレイヤーのみ存在する場合も opacity を適用
-                        IntArray(Tile.LENGTH).also {
-                            PixelOps.compositeLayer(it, subTile.pixels, subOp255, PixelOps.BLEND_NORMAL)
-                        }
+                        compositeScratch.fill(0)
+                        PixelOps.compositeLayer(compositeScratch, subTile.pixels, subOp255, PixelOps.BLEND_NORMAL)
+                        compositeScratch
                     }
                 }
                 else -> mainTile!!.pixels
@@ -470,7 +530,9 @@ class CanvasDocument(val width: Int, val height: Int) {
                 PixelOps.compositeLayer(result, clipped, effectiveOp255, layer.blendMode)
             } else {
                 PixelOps.compositeLayer(result, maskedPixels, effectiveOp255, layer.blendMode)
-                clipBaseTile = maskedPixels // 次のクリッピング用ベース更新
+                // 次のクリッピング用ベース更新
+                // maskedPixels が compositeScratch を指す場合は copyOf で独立コピーを保持
+                clipBaseTile = if (maskedPixels === compositeScratch) maskedPixels.copyOf() else maskedPixels
             }
         }
     }
@@ -796,13 +858,17 @@ class CanvasDocument(val width: Int, val height: Int) {
         // スナップショットからタイルを復元
         restoreTilesFromSnapshot(layer, snaps)
 
-        // ブラー処理
-        val src = layer.content.toPixelArray()
+        // ブラー処理 — 再利用バッファでスライダー操作中のアロケーションを回避
         val w = layer.content.width; val h = layer.content.height
+        val pixelCount = w * h
+        val src = filterPreviewBuf?.let { if (it.size >= pixelCount) it else null }
+            ?: IntArray(pixelCount).also { filterPreviewBuf = it }
+        layer.content.toPixelArray(src)
 
         when (blurType) {
             BLUR_GAUSSIAN -> {
-                val buf = src.copyOf()
+                val buf = filterPreviewBuf2?.let { if (it.size >= pixelCount) it else null }
+                    ?: IntArray(pixelCount).also { filterPreviewBuf2 = it }
                 boxBlurPass(src, buf, w, h, safeRadius)
                 boxBlurPass(buf, src, w, h, safeRadius)
                 boxBlurPass(src, buf, w, h, safeRadius)
@@ -834,6 +900,8 @@ class CanvasDocument(val width: Int, val height: Int) {
         }
         filterPreviewSnapshot = null
         filterPreviewLayerId = -1
+        filterPreviewBuf = null  // プレビュー終了時にバッファ解放
+        filterPreviewBuf2 = null
     }
 
     /**
@@ -853,6 +921,8 @@ class CanvasDocument(val width: Int, val height: Int) {
         releaseSnapshot(snaps)
         filterPreviewSnapshot = null
         filterPreviewLayerId = -1
+        filterPreviewBuf = null
+        filterPreviewBuf2 = null
     }
 
     /** スナップショットからレイヤータイルを復元 (参照は incRef して保持) */
@@ -1036,7 +1106,12 @@ class CanvasDocument(val width: Int, val height: Int) {
             is UndoEntry.TileDelta -> {
                 for ((_, tile) in entry.snapshots) tile?.decRef()
             }
-            is UndoEntry.Structural -> { /* TiledSurface.snapshot の参照は GC に任せる */ }
+            is UndoEntry.Structural -> {
+                // snapshot() で incRef されたタイル参照を解放
+                for (snap in entry.snapshots) {
+                    snap.surface.clear() // 内部で全タイルを decRef → null にする
+                }
+            }
         }
     }
 
@@ -1094,12 +1169,12 @@ class CanvasDocument(val width: Int, val height: Int) {
         layer
     }
 
-    /** 合成済み全ピクセル (エクスポート用) */
+    /** 合成済み全ピクセル (エクスポート用)。lock 内で backBuffer から読み取る。 */
     fun getCompositePixels(): IntArray {
         rebuildCompositeCache()
         val out = IntArray(width * height)
         for (ty in 0 until tilesY) for (tx in 0 until tilesX) {
-            val data = compositeCache[ty * tilesX + tx] ?: continue
+            val data = backBuffer[ty * tilesX + tx] ?: continue
             val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
             for (ly in 0 until Tile.SIZE) {
                 val py = by + ly; if (py >= height) break
@@ -1114,8 +1189,50 @@ class CanvasDocument(val width: Int, val height: Int) {
     val selectionManager: SelectionManager by lazy { SelectionManager(width, height) }
 
     /**
-     * 選択範囲外のピクセルを元の状態に復元する。
-     * ブラシストローク/フィルタ後に呼び出し、選択範囲内のみ変更を適用する。
+     * 選択範囲外のピクセルを COW スナップショットから復元する (タイル単位)。
+     * toPixelArray() を使わないため、メモリ効率が大幅に向上。
+     */
+    private fun restoreOutsideSelectionFromSurface(surface: TiledSurface, original: TiledSurface) {
+        val w = width; val h = height
+        val sm = selectionManager
+        for (ty in 0 until surface.tilesY) {
+            for (tx in 0 until surface.tilesX) {
+                val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+                var needsRestore = false
+                // このタイル内に選択範囲外ピクセルがあるかチェック
+                check@ for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        if (sm.getMaskValue(px, py) < 255) { needsRestore = true; break@check }
+                    }
+                }
+                if (!needsRestore) continue
+                val origTile = original.getTile(tx, ty)
+                val tile = surface.getOrCreateMutable(tx, ty)
+                for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        val maskVal = sm.getMaskValue(px, py)
+                        if (maskVal == 255) continue
+                        val idx = ly * Tile.SIZE + lx
+                        val origPixel = origTile?.pixels?.get(idx) ?: 0
+                        if (maskVal == 0) {
+                            tile.pixels[idx] = origPixel
+                        } else {
+                            val newPixel = tile.pixels[idx]
+                            tile.pixels[idx] = blendSelectionPixel(origPixel, newPixel, maskVal / 255f)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 選択範囲外のピクセルを元の状態に復元する (IntArray 版)。
+     * フィルター適用 (applyFilterWithSelection) で使用。
      */
     private fun restoreOutsideSelection(surface: TiledSurface, originalPixels: IntArray) {
         val w = width; val h = height

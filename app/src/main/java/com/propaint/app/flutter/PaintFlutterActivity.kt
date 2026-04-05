@@ -158,53 +158,67 @@ class PaintFlutterActivity : FlutterActivity(), ViewModelStoreOwner {
 
     private fun handleExport(uri: Uri) {
         val format = pendingExportFormat ?: return
-        try {
-            contentResolver.openOutputStream(uri)?.use { os ->
-                when (format) {
-                    "png" -> viewModel.exportPng(os)
-                    "jpeg" -> viewModel.exportJpeg(os)
-                    "psd" -> viewModel.exportPsd(os)
-                    "project" -> viewModel.saveProject(os)
+        // 画像エンコード等の重い I/O を IO スレッドで実行 (ANR 防止)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { os ->
+                    when (format) {
+                        "png" -> viewModel.exportPng(os)
+                        "jpeg" -> viewModel.exportJpeg(os)
+                        "psd" -> viewModel.exportPsd(os)
+                        "project" -> viewModel.saveProject(os)
+                    }
+                }
+                val label = when (format) {
+                    "png" -> "PNG"
+                    "jpeg" -> "JPEG"
+                    "psd" -> "PSD"
+                    "project" -> "プロジェクト"
+                    else -> format
+                }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@PaintFlutterActivity, "$label を保存しました", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                PaintDebug.d(PaintDebug.Layer) { "[Export] $format error: ${e.message}" }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@PaintFlutterActivity, "保存に失敗: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
-            val label = when (format) {
-                "png" -> "PNG"
-                "jpeg" -> "JPEG"
-                "psd" -> "PSD"
-                "project" -> "プロジェクト"
-                else -> format
-            }
-            Toast.makeText(this, "$label を保存しました", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            PaintDebug.d(PaintDebug.Layer) { "[Export] $format error: ${e.message}" }
-            Toast.makeText(this, "保存に失敗: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun handleImport(uri: Uri) {
         val type = pendingExportFormat ?: return
-        try {
-            val success = contentResolver.openInputStream(uri)?.use { ins ->
-                when (type) {
-                    "image" -> viewModel.importImageAsLayer(ins)
-                    "psd" -> viewModel.importPsd(ins)
-                    "project" -> viewModel.loadProject(ins)
-                    else -> false
+        // 画像デコード等の重い I/O を IO スレッドで実行 (ANR 防止)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val success = contentResolver.openInputStream(uri)?.use { ins ->
+                    when (type) {
+                        "image" -> viewModel.importImageAsLayer(ins)
+                        "psd" -> viewModel.importPsd(ins)
+                        "project" -> viewModel.loadProject(ins)
+                        else -> false
+                    }
+                } ?: false
+                val label = when (type) {
+                    "image" -> "画像をレイヤーとしてインポート"
+                    "psd" -> "PSD をインポート"
+                    "project" -> "プロジェクトを読み込み"
+                    else -> "インポート"
                 }
-            } ?: false
-            val label = when (type) {
-                "image" -> "画像をレイヤーとしてインポート"
-                "psd" -> "PSD をインポート"
-                "project" -> "プロジェクトを読み込み"
-                else -> "インポート"
+                withContext(Dispatchers.Main) {
+                    if (success) {
+                        Toast.makeText(this@PaintFlutterActivity, "${label}しました", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@PaintFlutterActivity, "${label}に失敗しました", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@PaintFlutterActivity, "読み込みに失敗: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
-            if (success) {
-                Toast.makeText(this, "${label}しました", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "${label}に失敗しました", Toast.LENGTH_SHORT).show()
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "読み込みに失敗: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 

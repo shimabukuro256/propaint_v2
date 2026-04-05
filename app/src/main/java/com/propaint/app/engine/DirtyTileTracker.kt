@@ -1,13 +1,14 @@
 package com.propaint.app.engine
 
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 class DirtyTileTracker {
     private val queue = ConcurrentLinkedQueue<Long>()
-    @Volatile var fullRebuildNeeded = true
+    private val fullRebuild = AtomicBoolean(true)
 
     fun markDirty(tx: Int, ty: Int) { queue.add(packCoord(tx, ty)) }
-    fun markFullRebuild() { fullRebuildNeeded = true }
+    fun markFullRebuild() { fullRebuild.set(true) }
 
     fun drain(): Set<Long> {
         val r = HashSet<Long>()
@@ -15,10 +16,8 @@ class DirtyTileTracker {
         return r
     }
 
-    fun checkAndClearFullRebuild(): Boolean {
-        if (fullRebuildNeeded) { fullRebuildNeeded = false; return true }
-        return false
-    }
+    /** アトミックに check-and-clear。GL スレッドとエンジンスレッドの競合を防止。 */
+    fun checkAndClearFullRebuild(): Boolean = fullRebuild.compareAndSet(true, false)
 
     companion object {
         fun packCoord(tx: Int, ty: Int): Long = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)

@@ -270,8 +270,8 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
           height: null,
           child: Stack(
             children: [
-              // 左スワイプ背景: アクションボタン
-              if (offset < -4)
+              // 左スワイプ背景: アクションボタン (フォルダでなければ表示)
+              if (offset < -4 && !widget.layer.isGroup)
                 Positioned.fill(
                   child: Container(
                     alignment: Alignment.centerRight,
@@ -453,8 +453,17 @@ class _LayerItem extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
                 children: [
-                  // 選択チェック or 表示トグル
-                  if (selected)
+                  // フォルダ: アイコン表示 / レイヤー: 選択チェック or 表示トグル
+                  if (layer.isGroup)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(
+                        Icons.folder_rounded,
+                        size: 18,
+                        color: C.accent,
+                      ),
+                    )
+                  else if (selected)
                     const Padding(
                       padding: EdgeInsets.only(right: 4),
                       child: Icon(Icons.check_circle_rounded, size: 18, color: C.accent),
@@ -469,30 +478,30 @@ class _LayerItem extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                   ],
-                  // クリップ
-                  _TinyToggle(
-                    icon: Icons.content_cut_rounded,
-                    active: layer.isClipToBelow,
-                    activeColor: C.accent,
-                    onTap: () => channel.setLayerClip(layer.id, !layer.isClipToBelow),
-                  ),
-                  const SizedBox(width: 4),
-                  // ロック
-                  _TinyToggle(
-                    icon: layer.isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
-                    active: layer.isLocked,
-                    activeColor: C.error,
-                    onTap: () => channel.setLayerLocked(layer.id, !layer.isLocked),
-                  ),
-                  const SizedBox(width: 4),
-                  // Alpha Lock
-                  _TinyToggle(
-                    icon: Icons.grid_on_rounded,
-                    active: layer.isAlphaLocked,
-                    activeColor: C.accent,
-                    onTap: () => channel.setAlphaLocked(layer.id, !layer.isAlphaLocked),
-                  ),
-                  const SizedBox(width: 8),
+                  // フォルダでなければクリップ・ロック・Alpha Lock表示
+                  if (!layer.isGroup) ...[
+                    _TinyToggle(
+                      icon: Icons.content_cut_rounded,
+                      active: layer.isClipToBelow,
+                      activeColor: C.accent,
+                      onTap: () => channel.setLayerClip(layer.id, !layer.isClipToBelow),
+                    ),
+                    const SizedBox(width: 4),
+                    _TinyToggle(
+                      icon: layer.isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
+                      active: layer.isLocked,
+                      activeColor: C.error,
+                      onTap: () => channel.setLayerLocked(layer.id, !layer.isLocked),
+                    ),
+                    const SizedBox(width: 4),
+                    _TinyToggle(
+                      icon: Icons.grid_on_rounded,
+                      active: layer.isAlphaLocked,
+                      activeColor: C.accent,
+                      onTap: () => channel.setAlphaLocked(layer.id, !layer.isAlphaLocked),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   // レイヤー名
                   Expanded(
                     child: Text(
@@ -500,17 +509,18 @@ class _LayerItem extends StatelessWidget {
                       style: TextStyle(
                         color: layer.isActive ? C.accent : C.textPrimary,
                         fontSize: 12,
-                        fontWeight: layer.isActive ? FontWeight.w600 : FontWeight.normal,
+                        fontWeight: layer.isActive ? FontWeight.w600 : (layer.isGroup ? FontWeight.w500 : FontWeight.normal),
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  // 不透明度表示
-                  Text(
-                    '${(layer.opacity * 100).round()}%',
-                    style: const TextStyle(color: C.textSecondary, fontSize: 11),
-                  ),
-                  const SizedBox(width: 4),
+                  // フォルダでなければ不透明度表示
+                  if (!layer.isGroup)
+                    Text(
+                      '${(layer.opacity * 100).round()}%',
+                      style: const TextStyle(color: C.textSecondary, fontSize: 11),
+                    ),
+                  if (!layer.isGroup) const SizedBox(width: 4),
                   // 展開ボタン
                   GestureDetector(
                     onTap: onToggleExpand,
@@ -525,8 +535,8 @@ class _LayerItem extends StatelessWidget {
             ),
           ),
 
-          // 展開部分
-          if (expanded) _LayerExpanded(layer: layer, channel: channel),
+          // 展開部分 (フォルダでなければ表示)
+          if (expanded && !layer.isGroup) _LayerExpanded(layer: layer, channel: channel),
         ],
       ),
     );

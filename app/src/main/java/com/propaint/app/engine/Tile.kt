@@ -137,6 +137,13 @@ class TiledSurface(val width: Int, val height: Int) {
     /** 全ピクセルを IntArray で取得 (エクスポート用) */
     fun toPixelArray(): IntArray {
         val out = IntArray(width * height)
+        toPixelArray(out)
+        return out
+    }
+
+    /** 全ピクセルを既存バッファに書き込む (フィルタープレビュー等でのアロケーション回避用) */
+    fun toPixelArray(out: IntArray) {
+        out.fill(0)
         for (ty in 0 until tilesY) for (tx in 0 until tilesX) {
             val tile = getTile(tx, ty) ?: continue
             val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
@@ -146,6 +153,5 @@ class TiledSurface(val width: Int, val height: Int) {
                 System.arraycopy(tile.pixels, ly * Tile.SIZE, out, py * width + bx, cw)
             }
         }
-        return out
     }
 }

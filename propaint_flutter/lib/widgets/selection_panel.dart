@@ -98,27 +98,6 @@ class SelectionPanel extends StatelessWidget {
             ),
           ),
 
-          // 描画モードに戻る
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 2, 10, 10),
-            child: SizedBox(
-              width: double.infinity,
-              height: 32,
-              child: OutlinedButton.icon(
-                onPressed: () {
-                  channel.setToolMode('Draw');
-                  onClose?.call();
-                },
-                icon: const Icon(Icons.edit_rounded, size: 16),
-                label: const Text('描画モードに戻る', style: TextStyle(fontSize: 12)),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: C.textPrimary,
-                  side: const BorderSide(color: C.border),
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );

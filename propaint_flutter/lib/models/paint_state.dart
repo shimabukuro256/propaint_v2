@@ -99,6 +99,7 @@ class LayerInfo {
   final bool isEditingMask;
   final int groupId;
   final bool isTextLayer;
+  final bool isGroup;
 
   const LayerInfo({
     required this.id,
@@ -115,6 +116,7 @@ class LayerInfo {
     this.isEditingMask = false,
     this.groupId = 0,
     this.isTextLayer = false,
+    this.isGroup = false,
   });
 
   factory LayerInfo.fromMap(Map<String, dynamic> m) => LayerInfo(
@@ -132,6 +134,7 @@ class LayerInfo {
         isEditingMask: m['isEditingMask'] as bool? ?? false,
         groupId: (m['groupId'] as num?)?.toInt() ?? 0,
         isTextLayer: m['isTextLayer'] as bool? ?? false,
+        isGroup: m['isGroup'] as bool? ?? false,
       );
 }
 

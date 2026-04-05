@@ -34,6 +34,7 @@ data class UiLayer(
     val isEditingMask: Boolean = false,
     val groupId: Int = 0,
     val isTextLayer: Boolean = false,
+    val isGroup: Boolean = false,  // レイヤーグループ（フォルダ）フラグ
 )
 
 enum class BrushType(
@@ -204,6 +205,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _cursorState.value = _cursorState.value.copy(visible = false)
         renderer.cursorVisible = false
     }
+
+    // ストローク中のブラシ設定キャッシュ (ACTION_DOWN で構築、MOVE 中は再利用)
+    private var cachedStrokeBrush: BrushConfig? = null
 
     // View transform
     private var _zoom = 1f; private var _panX = 0f; private var _panY = 0f; private var _rotation = 0f
@@ -889,6 +893,36 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
+        // なげなわ選択 (SelectLasso): ドラッグでポリゴン頂点を蓄積
+        if (_toolMode.value == ToolMode.SelectLasso) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    _lassoPoints.clear()
+                    val (dx, dy) = screenToDoc(event.x, event.y)
+                    _lassoPoints.add(dx.toInt() to dy.toInt())
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val (dx, dy) = screenToDoc(event.x, event.y)
+                    val point = dx.toInt() to dy.toInt()
+                    // 前回のポイントと距離が十分あれば追加（スムージング）
+                    val lastPoint = _lassoPoints.lastOrNull()
+                    if (lastPoint == null || kotlin.math.hypot(
+                        (dx - lastPoint.first).toFloat(),
+                        (dy - lastPoint.second).toFloat()
+                    ) >= 4f) {
+                        _lassoPoints.add(point)
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (event.actionMasked == MotionEvent.ACTION_UP && _lassoPoints.size >= 3) {
+                        selectLasso(_lassoPoints)
+                    }
+                    _lassoPoints.clear()
+                }
+            }
+            return true
+        }
+
         // 選択ペン / 選択消しペン: ブラシサイズでマスクをペイント
         if (_toolMode.value == ToolMode.SelectPen || _toolMode.value == ToolMode.SelectEraser) {
             val isAdd = _toolMode.value == ToolMode.SelectPen
@@ -978,6 +1012,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 updateCursor(event.x, event.y, event.pressure)
                 var brush = buildBrushConfig()
                 if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
+                cachedStrokeBrush = brush
                 doc.beginStroke(brush)
                 _isDrawing.value = true
                 processDrawPoints(event, doc, brush)
@@ -985,8 +1020,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             MotionEvent.ACTION_MOVE -> {
                 updateCursor(event.x, event.y, event.pressure)
                 if (_isDrawing.value) {
-                    var brush = buildBrushConfig()
-                    if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
+                    val brush = cachedStrokeBrush ?: return true
                     processDrawPoints(event, doc, brush)
                 }
             }
@@ -994,9 +1028,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 hideCursor()
                 if (event.actionMasked == MotionEvent.ACTION_UP) stylusIsDown = false
                 if (_isDrawing.value) {
-                    var brush = buildBrushConfig()
-                    if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
+                    val brush = cachedStrokeBrush ?: buildBrushConfig()
                     doc.endStroke(brush)
+                    cachedStrokeBrush = null
                     _isDrawing.value = false
                     hasUnsavedChanges = true
                     updateUndoState()
@@ -1034,6 +1068,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 選択ツールのドラッグ開始座標 (スクリーン座標) */
     private var _selectionDragStart: Pair<Float, Float>? = null
+    /** なげなわ選択のポイント蓄積 */
+    private val _lassoPoints = mutableListOf<Pair<Int, Int>>()
     /** 図形ツールのドラッグ開始座標 (ドキュメント座標) */
     private var _shapeDragStart: Pair<Float, Float>? = null
 
@@ -1056,7 +1092,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleMultiTouch(event: MotionEvent) {
         if (!isMultiTouch && _isDrawing.value) {
             // 最初の指で始まった不要ストロークを終了し、即座に undo で取り消す
-            _document?.endStroke(buildBrushConfig()); _isDrawing.value = false
+            val brush = cachedStrokeBrush ?: buildBrushConfig()
+            _document?.endStroke(brush); cachedStrokeBrush = null; _isDrawing.value = false
             _document?.undo(); updateUndoState()
             multiTouchAccidentalStroke = true
         }
@@ -1211,8 +1248,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun reorderLayer(fromIndex: Int, toIndex: Int) {
         val doc = _document ?: return
-        require(fromIndex in doc.layers.indices) { "fromIndex out of range: $fromIndex" }
-        require(toIndex in doc.layers.indices) { "toIndex out of range: $toIndex" }
+        if (fromIndex !in doc.layers.indices || toIndex !in doc.layers.indices) return
         if (fromIndex == toIndex) return
         doc.moveLayer(fromIndex, toIndex)
         updateLayerState()
@@ -1386,7 +1422,26 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateLayerState() {
         val doc = _document ?: return
-        _layers.value = doc.layers.map {
+        val uiLayers = mutableListOf<UiLayer>()
+
+        // ── レイヤーグループをリストに含める ──
+        // groupId の昇順でグループを挿入
+        for ((gId, group) in doc.layerGroups.toSortedMap()) {
+            uiLayers.add(UiLayer(
+                id = -gId,  // グループは負の ID で区別
+                name = group.name,
+                opacity = 1f,
+                blendMode = 0,
+                isVisible = group.isVisible,
+                isLocked = false,
+                isClipToBelow = false,
+                isActive = false,
+                isGroup = true  // グループフラグをセット
+            ))
+        }
+
+        // ── 通常のレイヤーを追加 ──
+        uiLayers.addAll(doc.layers.map {
             UiLayer(it.id, it.name, it.opacity, it.blendMode,
                 it.isVisible, it.isLocked, it.isClipToBelow, it.id == doc.activeLayerId,
                 it.isAlphaLocked,
@@ -1394,8 +1449,11 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 isMaskEnabled = it.isMaskEnabled,
                 isEditingMask = it.isEditingMask,
                 groupId = it.groupId,
-                isTextLayer = it.textConfig != null)
-        }
+                isTextLayer = it.textConfig != null,
+                isGroup = false)
+        })
+
+        _layers.value = uiLayers
     }
 
     private fun updateUndoState() {

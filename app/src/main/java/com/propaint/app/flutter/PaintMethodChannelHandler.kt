@@ -84,28 +84,28 @@ class PaintMethodChannelHandler(
             "setBrushSize" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
-                require(v > 0f) { "BrushSize must be > 0" }
+                if (v <= 0f) return result.error("INVALID_ARG", "BrushSize must be > 0", null)
                 viewModel.setBrushSize(v)
                 result.success(null)
             }
             "setBrushOpacity" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
-                check(v in 0f..1f) { "opacity must be in 0..1" }
+                if (v !in 0f..1f) return result.error("INVALID_ARG", "opacity must be in 0..1", null)
                 viewModel.setBrushOpacity(v)
                 result.success(null)
             }
             "setBrushHardness" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
-                check(v in 0f..1f) { "hardness must be in 0..1" }
+                if (v !in 0f..1f) return result.error("INVALID_ARG", "hardness must be in 0..1", null)
                 viewModel.setBrushHardness(v)
                 result.success(null)
             }
             "setBrushAntiAliasing" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
-                check(v in 0f..1f) { "antiAliasing must be in 0..1" }
+                if (v !in 0f..1f) return result.error("INVALID_ARG", "antiAliasing must be in 0..1", null)
                 viewModel.setBrushAntiAliasing(v)
                 result.success(null)
             }
@@ -118,7 +118,7 @@ class PaintMethodChannelHandler(
             "setBrushSpacing" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
-                require(v > 0f) { "spacing must be > 0" }
+                if (v <= 0f) return result.error("INVALID_ARG", "spacing must be > 0", null)
                 viewModel.setBrushSpacing(v)
                 result.success(null)
             }
@@ -273,26 +273,26 @@ class PaintMethodChannelHandler(
             // ── レイヤーグループ ──
             "createLayerGroup" -> {
                 val name = call.argument<String>("name") ?: "フォルダ"
-                viewModel.createLayerGroup(name); result.success(null)
+                launchHeavy(result) { viewModel.createLayerGroup(name) }
             }
             "deleteLayerGroup" -> {
                 val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
-                viewModel.deleteLayerGroup(groupId); result.success(null)
+                launchHeavy(result) { viewModel.deleteLayerGroup(groupId) }
             }
             "setLayerGroup" -> {
                 val layerId = call.argument<Int>("layerId") ?: return result.error("INVALID_ARG", "layerId is required", null)
                 val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
-                viewModel.setLayerGroup(layerId, groupId); result.success(null)
+                launchHeavy(result) { viewModel.setLayerGroup(layerId, groupId) }
             }
             "setGroupVisibility" -> {
                 val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
                 val visible = call.argument<Boolean>("visible") ?: true
-                viewModel.setGroupVisibility(groupId, visible); result.success(null)
+                launchHeavy(result) { viewModel.setGroupVisibility(groupId, visible) }
             }
             "setGroupOpacity" -> {
                 val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
                 val opacity = call.argument<Double>("opacity")?.toFloat()?.coerceIn(0f, 1f) ?: 1f
-                viewModel.setGroupOpacity(groupId, opacity); result.success(null)
+                launchHeavy(result) { viewModel.setGroupOpacity(groupId, opacity) }
             }
 
             // ── ツールモード ──
@@ -516,7 +516,7 @@ class PaintMethodChannelHandler(
                     viewModel.pressureSizeEnabled,
                     viewModel.pressureOpacityEnabled,
                     viewModel.pressureDensityEnabled,
-                ) { _ -> "brush_type" }
+                ) { a, b, c, d -> "$a-$b-$c-$d" }  // 実際の値を含めることで distinctUntilChanged が変化を検出
                     .distinctUntilChanged()
                     .collect { sendDiff() }
             }
