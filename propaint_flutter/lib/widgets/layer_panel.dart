@@ -20,6 +20,7 @@ class _LayerPanelState extends State<LayerPanel> {
   final Set<int> _selectedIds = {};
   final Set<int> _expandedGroupIds = {};
   int? _draggedLayerId;
+  int? _dragOverGroupId;  // ドラッグオーバー中のグループID
 
   void _toggleSelection(int id) {
     setState(() {
@@ -259,13 +260,16 @@ class _LayerPanelState extends State<LayerPanel> {
                   depth: item.depth,
                   parentGroupId: item.parentGroupId,
                   isExpandedGroup: isExpandedGroup,
+                  isDragOverTarget: _dragOverGroupId == layer.id && layer.isGroup,
                   channel: widget.channel,
                   onTap: () {
                     if (hasSelection) {
                       _toggleSelection(layer.id);
                     } else {
-                      // フォルダの場合は選択しない（展開/折畳のみ）
-                      if (!layer.isGroup) {
+                      // フォルダの場合は展開/折畳、レイヤーの場合は選択
+                      if (layer.isGroup) {
+                        _toggleGroupExpanded(layer.id);
+                      } else {
                         widget.channel.selectLayer(layer.id);
                       }
                     }
@@ -313,6 +317,7 @@ class _SwipeableLayerItem extends StatefulWidget {
   final int depth;
   final int? parentGroupId;
   final bool isExpandedGroup;
+  final bool isDragOverTarget;
   final PaintChannel channel;
   final VoidCallback onTap;
   final VoidCallback onToggleExpand;
@@ -329,6 +334,7 @@ class _SwipeableLayerItem extends StatefulWidget {
     required this.depth,
     this.parentGroupId,
     required this.isExpandedGroup,
+    required this.isDragOverTarget,
     required this.channel,
     required this.onTap,
     required this.onToggleExpand,
@@ -486,6 +492,7 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                     selected: widget.selected,
                     depth: widget.depth,
                     isExpandedGroup: widget.isExpandedGroup,
+                    isDragOverTarget: widget.isDragOverTarget,
                     channel: widget.channel,
                     onTap: widget.onTap,
                     onToggleExpand: widget.onToggleExpand,
@@ -545,6 +552,7 @@ class _LayerItem extends StatelessWidget {
   final bool selected;
   final int depth;
   final bool isExpandedGroup;
+  final bool isDragOverTarget;
   final PaintChannel channel;
   final VoidCallback onTap;
   final VoidCallback onToggleExpand;
@@ -558,6 +566,7 @@ class _LayerItem extends StatelessWidget {
     required this.selected,
     required this.depth,
     required this.isExpandedGroup,
+    required this.isDragOverTarget,
     required this.channel,
     required this.onTap,
     required this.onToggleExpand,
@@ -574,15 +583,19 @@ class _LayerItem extends StatelessWidget {
     return Container(
       margin: EdgeInsets.only(left: leftMargin, right: 6, top: 2, bottom: 2),
       decoration: BoxDecoration(
-        color: selected
-            ? C.accent.withAlpha(40)
-            : layer.isActive ? C.accentDim.withAlpha(60) : C.card,
+        color: isDragOverTarget && layer.isGroup
+            ? C.accent.withAlpha(80)  // ドラッグオーバー中：強調表示
+            : selected
+                ? C.accent.withAlpha(40)
+                : layer.isActive ? C.accentDim.withAlpha(60) : C.card,
         borderRadius: BorderRadius.circular(8),
-        border: selected
-            ? Border.all(color: C.accent, width: 1.5)
-            : layer.isActive
-                ? Border.all(color: C.accent.withAlpha(80), width: 1)
-                : null,
+        border: isDragOverTarget && layer.isGroup
+            ? Border.all(color: C.accent, width: 2)  // ドラッグオーバー中：太い枠線
+            : selected
+                ? Border.all(color: C.accent, width: 1.5)
+                : layer.isActive
+                    ? Border.all(color: C.accent.withAlpha(80), width: 1)
+                    : null,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
