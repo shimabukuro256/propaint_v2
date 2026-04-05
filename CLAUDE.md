@@ -11,12 +11,23 @@ UI は Flutter (メイン) + Compose (ギャラリー)。
 ```
 app/src/main/java/com/propaint/app/
 ├── engine/        # 描画エンジン (BrushEngine, CanvasDocument, PixelOps, Tile 等)
+│                  # - 4段階ブラシサイズスケーリング（radScale）
+│                  # - Lazy Nezumi風手振れ補正（EMA + キャッチアップ）
 ├── gl/            # OpenGL レンダラ (表示専用、描画処理なし)
 ├── ui/            # Compose UI (PaintScreen, パネル類)
 ├── gallery/       # ギャラリー画面 (GalleryScreen, NewCanvasDialog)
 ├── viewmodel/     # PaintViewModel
+│                  # - レイヤーグループ（フォルダ）管理
+│                  # - UiLayer.isGroup / groupId フィールド
 └── flutter/       # Flutter 連携 (MethodChannel)
+                   # - レイヤーグループのCRUD操作
 ```
+
+### 主要機能
+
+- **レイヤーグループ（フォルダ）**: CanvasDocument で管理。ツリー構造に対応。
+- **ブラシサイズスケーリング**: 4段階（小 <0.4, 小中 0.4-1, 中大 1-8, 大 ≥8）による自動パラメータ調整。
+- **手振れ補正**: Lazy Nezumi 準拠の EMA フィルタ + 距離ベースキャッチアップ + 圧力タッパー。
 
 ---
 
@@ -92,6 +103,19 @@ app/src/main/java/com/propaint/app/
 - 重い処理は全て `launchHeavy` (バックグラウンド) で実行
 - GL 操作は `queueEvent` で GL スレッドに委譲
 
+### 問題8: レイヤーグループのID変換ミス
+
+**症状**: フォルダの削除・移動が機能しない
+**原因**: 
+- `PaintViewModel` で フォルダに負のID（`id = -gId`）を振る
+- Flutter UI で この負のIDを `deleteLayerGroup()` / `setLayerGroup()` に直接渡す
+- Kotlin 側は正の `groupId` を期待しており、負のIDではマッチしない
+
+**対策**:
+- Flutter で フォルダ操作時に ID を正に変換：`deleteLayerGroup(-id)`, `setLayerGroup(layerId, -groupId)`
+- Flutter で フォルダを `selectLayer()` で選択しない（展開/折畳のみ）
+- `serializeLayers()` に `"isGroup"` フラグを含める（UI での判定用）
+
 ### Flutter ↔ Kotlin 連携コード修正時のチェックリスト
 
 - [ ] MethodChannel のハンドラで重い処理を UI スレッドで実行していないか
@@ -101,6 +125,10 @@ app/src/main/java/com/propaint/app/
 - [ ] Activity 再生成で失われる状態がないか (SavedState)
 - [ ] PlatformView のリソース解放が実装されているか
 - [ ] 保存処理に排他制御 (Mutex) があるか
+- [ ] レイヤーグループのID（負 ↔ 正）を正しく変換しているか
+  - Kotlin で フォルダID は正（1, 2, 3...）
+  - Flutter では UI レベルで負のID（-1, -2, -3...）で表現
+  - 操作時に変換：`deleteLayerGroup(-id)`, `setLayerGroup(layerId, -groupId)`
 
 ---
 
@@ -210,6 +238,15 @@ DebugConfig.enableDiagnosticLog フラグで制御可能にすること。
 - ACTION_CANCEL が処理されているか
 - HistoricalEvent が全て処理されているか
 
+### レイヤー・グループ
+- Kotlin で UiLayer に `isGroup` フラグが含まれているか
+- Flutter の EventChannel で `"isGroup"` を `serializeLayers()` に含めているか
+- フォルダID変換：Flutter で負のID（-gId）を正に変換しているか
+  - `deleteLayerGroup(-id)` で削除
+  - `setLayerGroup(layerId, -groupId)` で移動
+- フォルダの `selectLayer()` 呼び出しを避けているか（選択不可）
+- フォルダ展開/折畳のクリックハンドラが正しく分離しているか
+
 ---
 
 ## 既知バグパターン（コード生成時に照合すること）
@@ -254,6 +291,15 @@ DebugConfig.enableDiagnosticLog フラグで制御可能にすること。
 - PlatformView でメモリリーク → `dispose()` で GL リソース解放を実装
 - レイヤー操作でフリーズ → MethodChannel ハンドラの重い処理を `launchHeavy` に移動
 
+### レイヤーグループ系
+- フォルダが削除できない / 移動できない → Flutter で負のグループID（-gId）から正のIDに変換していない
+  - `deleteLayerGroup(-id)` でフォルダIDを正に変換
+  - `setLayerGroup(layerId, -groupId)` でグループIDを正に変換
+- フォルダがUI上で表示されない → `serializeLayers()` に `isGroup` フラグが含まれていない
+  - EventChannel で `"isGroup" to layer.isGroup` を追加
+- フォルダ選択時にクラッシュ → 負のIDで `selectLayer()` を呼ばない
+  - フォルダはタップで展開/折畳のみ（選択操作をスキップ）
+
 ---
 
 ## 最終自問（出力直前）
@@ -262,6 +308,10 @@ DebugConfig.enableDiagnosticLog フラグで制御可能にすること。
 2. null / 0 / NaN / 空配列が入りうる引数全てに防御処理があるか？
 3. マルチスレッドでアクセスされるデータに同期機構 / COW があるか？
 4. 上記の既知バグパターンが再発していないか？
+5. **レイヤーグループ操作時に、ID の正負変換が必要か確認したか？**
+   - Kotlin で の `groupId` は正数（1, 2, 3...）
+   - Flutter での フォルダ `id` は負数（-1, -2, -3...）
+   - オペレーション時に必ず変換する
 
 → 1つでも不十分なら修正してから出力する。
 
