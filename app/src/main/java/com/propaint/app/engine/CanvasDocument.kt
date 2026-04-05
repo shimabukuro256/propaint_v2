@@ -1362,9 +1362,16 @@ class CanvasDocument(val width: Int, val height: Int) {
     private var nextGroupId = 1
 
     fun createLayerGroup(name: String): LayerGroupInfo = lock.withLock {
-        val group = LayerGroupInfo(nextGroupId++, name)
+        // デフォルト名の場合は一意な番号を付与
+        val finalName = if (name == "フォルダ") {
+            val count = _layerGroups.count { it.value.name.startsWith("フォルダ") }
+            "フォルダ ${count + 1}"
+        } else {
+            name
+        }
+        val group = LayerGroupInfo(nextGroupId++, finalName)
         _layerGroups[group.id] = group
-        PaintDebug.d(PaintDebug.Layer) { "[createLayerGroup] id=${group.id} name=$name" }
+        PaintDebug.d(PaintDebug.Layer) { "[createLayerGroup] id=${group.id} name=$finalName" }
         group
     }
 

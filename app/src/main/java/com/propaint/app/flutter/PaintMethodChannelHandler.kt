@@ -665,6 +665,7 @@ class PaintMethodChannelHandler(
                 "isEditingMask" to layer.isEditingMask,
                 "groupId" to layer.groupId,
                 "isTextLayer" to layer.isTextLayer,
+                "isGroup" to layer.isGroup,
             )
         }
 
