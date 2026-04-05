@@ -216,15 +216,19 @@ class _LayerPanelState extends State<LayerPanel> {
                 final oldItem = displayItems[oldIndex];
                 final newItem = displayItems[newIndex];
 
-                // フォルダの場合は reorderLayerGroup、レイヤーの場合は reorderLayer
-                if (oldItem.layer.isGroup && newItem.layer.isGroup) {
-                  // 両方ともフォルダ：フォルダの順序を変更
+                // ドロップ先がフォルダの場合：レイヤーをフォルダ内に移動
+                if (!oldItem.layer.isGroup && newItem.layer.isGroup) {
+                  widget.channel.setLayerGroup(oldItem.layer.id, -newItem.layer.id);
+                }
+                // 両方ともフォルダ：フォルダの順序を変更
+                else if (oldItem.layer.isGroup && newItem.layer.isGroup) {
                   widget.channel.reorderLayerGroup(-oldItem.layer.id, -newItem.layer.id);
-                } else if (!oldItem.layer.isGroup && !newItem.layer.isGroup) {
-                  // 両方ともレイヤー：レイヤーの順序を変更
+                }
+                // 両方ともレイヤー：レイヤーの順序を変更
+                else if (!oldItem.layer.isGroup && !newItem.layer.isGroup) {
                   widget.channel.reorderLayer(oldItem.docIndex, newItem.docIndex);
                 }
-                // フォルダとレイヤーの混在は並び替えしない（ドラッグ開始位置がフォルダ内の場合）
+                // その他の組み合わせは処理しない
               },
               proxyDecorator: (child, index, animation) {
                 return AnimatedBuilder(
