@@ -163,7 +163,7 @@ class _LayerPanelState extends State<LayerPanel> {
     });
   }
 
-  late final List<_LayerDisplayItem> displayItems;
+  List<_LayerDisplayItem> displayItems = [];
 
   @override
   Widget build(BuildContext context) {
