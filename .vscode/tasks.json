@@ -19,16 +19,23 @@
                 "focus": false,
                 "panel": "shared"
             },
-            "problemMatcher": {
-                "pattern": {
-                    "regexp": "^.*?(ERROR|error|Error).*?$",
-                    "line": 1
-                },
-                "background": {
-                    "activeOnStart": false,
-                    "beginsPattern": "^.*?Starting Android Gradle build.*?$",
-                    "endsPattern": "^.*?BUILD SUCCESSFUL.*?$|^.*?BUILD FAILED.*?$"
-                }
+            "isBackground": false
+        },
+        {
+            "label": "build:app:debug-cache",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": [
+                ":app:installDebug"
+            ],
+            "group": {
+                "kind": "build"
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
             },
             "isBackground": false
         },

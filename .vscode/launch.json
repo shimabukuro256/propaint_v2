@@ -3,34 +3,9 @@
     "configurations": [
         {
             "name": "🚀 ProPaint - Build & Run Debug",
-            "type": "shell",
+            "type": "dart",
             "request": "launch",
-            "command": "./gradlew",
-            "args": [
-                "clean",
-                ":app:installDebug"
-            ],
-            "group": {
-                "kind": "debug",
-                "isDefault": true
-            },
-            "presentation": {
-                "echo": true,
-                "reveal": "always",
-                "focus": false,
-                "panel": "shared"
-            },
-            "problemMatcher": []
-        },
-        {
-            "name": "📦 ProPaint - Build Release",
-            "type": "shell",
-            "request": "launch",
-            "command": "./gradlew",
-            "args": [
-                "clean",
-                ":app:assembleRelease"
-            ],
+            "preLaunchTask": "build:app:debug",
             "presentation": {
                 "echo": true,
                 "reveal": "always",
@@ -40,12 +15,21 @@
         },
         {
             "name": "⚡ ProPaint - Build Debug (キャッシュ使用)",
-            "type": "shell",
+            "type": "dart",
             "request": "launch",
-            "command": "./gradlew",
-            "args": [
-                ":app:installDebug"
-            ],
+            "preLaunchTask": "build:app:debug-cache",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "name": "📦 ProPaint - Build Release",
+            "type": "dart",
+            "request": "launch",
+            "preLaunchTask": "build:app:release",
             "presentation": {
                 "echo": true,
                 "reveal": "always",
