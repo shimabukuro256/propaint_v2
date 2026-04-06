@@ -14,22 +14,46 @@ import java.nio.ByteOrder
  *  - クリッピングマスク (isClipToBelow)
  *  - 主要ブレンドモード
  *  - RLE 圧縮チャンネルデータ
+ *  - レイヤーグループ (フォルダ) — lsct セクションディバイダー
  */
 object PsdExporter {
+
+    /**
+     * PSD レイヤーリストの論理アイテム。
+     * 通常レイヤー or グループ開始マーカー or グループ終了マーカー。
+     */
+    private sealed class PsdLayerItem {
+        /** 通常レイヤー */
+        data class Regular(val layer: Layer) : PsdLayerItem()
+        /** グループ開始（ヘッダー）— lsct type=1(open) or 2(closed) */
+        data class GroupStart(val group: LayerGroupInfo) : PsdLayerItem()
+        /** グループ終了マーカー — lsct type=3 */
+        data class GroupEnd(val group: LayerGroupInfo) : PsdLayerItem()
+    }
 
     fun export(doc: CanvasDocument, output: OutputStream) {
         val w = doc.width
         val h = doc.height
         val layers = doc.layers
+        val groups = doc.layerGroups
 
         PaintDebug.d(PaintDebug.Layer) {
-            "[PsdExporter] width=$w height=$h layers=${layers.size}"
+            "[PsdExporter] width=$w height=$h layers=${layers.size} groups=${groups.size}"
         }
 
         require(w > 0 && h > 0) { "[PsdExporter] invalid canvas size: ${w}x${h}" }
 
         if (layers.isEmpty()) {
             PaintDebug.d(PaintDebug.Layer) { "[PsdExporter] WARNING: no layers to export" }
+        }
+
+        // ── PSD レイヤー順序を構築 ──
+        // PSD はボトム→トップの順で格納。
+        // グループ構造: [GroupEnd] → [子レイヤー...] → [GroupStart]
+        val psdItems = buildPsdLayerOrder(layers, groups)
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[PsdExporter] psdItems=${psdItems.size} (layers=${layers.size} groups=${groups.size})"
         }
 
         val buf = ByteArrayOutputStream(w * h * 4)
@@ -52,7 +76,6 @@ object PsdExporter {
         out.writeInt(0)
 
         // ── Layer and Mask Information ──
-        // この部分全体の長さをあとで埋める
         val layerMaskLenPos = buf.size()
         out.writeInt(0) // placeholder
 
@@ -60,77 +83,87 @@ object PsdExporter {
         val layerInfoLenPos = buf.size()
         out.writeInt(0) // placeholder
 
-        out.writeShort(layers.size) // layer count
+        out.writeShort(psdItems.size) // layer count
 
-        // ── 各レイヤーのピクセルデータを事前に抽出 ──
+        // ── 各アイテムのピクセルデータと圧縮データを事前計算 ──
         data class LayerPixels(
             val red: ByteArray, val green: ByteArray,
             val blue: ByteArray, val alpha: ByteArray,
             val top: Int, val left: Int, val bottom: Int, val right: Int,
         )
 
-        val layerPixelsList = ArrayList<LayerPixels>(layers.size)
+        data class CompressedChannel(val data: ByteArray)
 
-        for (layer in layers) {
-            // レイヤーの有効バウンディングボックスを計算
-            val pixels = layer.content.toPixelArray()
-            var minX = w; var minY = h; var maxX = 0; var maxY = 0
-            for (y in 0 until h) {
-                for (x in 0 until w) {
-                    val c = pixels[y * w + x]
-                    if (PixelOps.alpha(c) > 0) {
-                        if (x < minX) minX = x
-                        if (x > maxX) maxX = x
-                        if (y < minY) minY = y
-                        if (y > maxY) maxY = y
+        val layerPixelsList = ArrayList<LayerPixels>(psdItems.size)
+        val allCompressed = ArrayList<List<CompressedChannel>>(psdItems.size)
+
+        for (item in psdItems) {
+            when (item) {
+                is PsdLayerItem.Regular -> {
+                    val layer = item.layer
+                    val pixels = layer.content.toPixelArray()
+                    var minX = w; var minY = h; var maxX = 0; var maxY = 0
+                    for (y in 0 until h) {
+                        for (x in 0 until w) {
+                            val c = pixels[y * w + x]
+                            if (PixelOps.alpha(c) > 0) {
+                                if (x < minX) minX = x
+                                if (x > maxX) maxX = x
+                                if (y < minY) minY = y
+                                if (y > maxY) maxY = y
+                            }
+                        }
                     }
+                    // 空レイヤーは 0x0 バウンディングボックス
+                    if (maxX < minX) {
+                        minX = 0; minY = 0; maxX = 0; maxY = 0
+                    } else {
+                        maxX++; maxY++ // exclusive
+                    }
+
+                    val lw = maxX - minX
+                    val lh = maxY - minY
+                    val red = ByteArray(lw * lh)
+                    val green = ByteArray(lw * lh)
+                    val blue = ByteArray(lw * lh)
+                    val alpha = ByteArray(lw * lh)
+
+                    for (y in 0 until lh) {
+                        for (x in 0 until lw) {
+                            val c = pixels[(minY + y) * w + (minX + x)]
+                            val straight = PixelOps.unpremultiply(c)
+                            red[y * lw + x] = (PixelOps.red(straight) and 0xFF).toByte()
+                            green[y * lw + x] = (PixelOps.green(straight) and 0xFF).toByte()
+                            blue[y * lw + x] = (PixelOps.blue(straight) and 0xFF).toByte()
+                            alpha[y * lw + x] = (PixelOps.alpha(straight) and 0xFF).toByte()
+                        }
+                    }
+
+                    val lp = LayerPixels(red, green, blue, alpha, minY, minX, maxY, maxX)
+                    layerPixelsList.add(lp)
+
+                    val channels = listOf(lp.alpha, lp.red, lp.green, lp.blue)
+                    allCompressed.add(channels.map { chData ->
+                        CompressedChannel(compressRLE(chData, lw, lh))
+                    })
+                }
+                is PsdLayerItem.GroupStart, is PsdLayerItem.GroupEnd -> {
+                    // グループマーカーはピクセルなし (0x0)
+                    val empty = ByteArray(0)
+                    layerPixelsList.add(LayerPixels(empty, empty, empty, empty, 0, 0, 0, 0))
+                    allCompressed.add(listOf(
+                        CompressedChannel(ByteArray(0)),
+                        CompressedChannel(ByteArray(0)),
+                        CompressedChannel(ByteArray(0)),
+                        CompressedChannel(ByteArray(0)),
+                    ))
                 }
             }
-            // 空レイヤーは全域 0 として扱う
-            if (maxX < minX) { minX = 0; minY = 0; maxX = 0; maxY = 0 }
-            else { maxX++; maxY++ } // exclusive
-
-            val lw = maxX - minX
-            val lh = maxY - minY
-            val red = ByteArray(lw * lh)
-            val green = ByteArray(lw * lh)
-            val blue = ByteArray(lw * lh)
-            val alpha = ByteArray(lw * lh)
-
-            for (y in 0 until lh) {
-                for (x in 0 until lw) {
-                    val c = pixels[(minY + y) * w + (minX + x)]
-                    // premultiplied → straight alpha に変換
-                    val straight = PixelOps.unpremultiply(c)
-                    red[y * lw + x] = (PixelOps.red(straight) and 0xFF).toByte()
-                    green[y * lw + x] = (PixelOps.green(straight) and 0xFF).toByte()
-                    blue[y * lw + x] = (PixelOps.blue(straight) and 0xFF).toByte()
-                    alpha[y * lw + x] = (PixelOps.alpha(straight) and 0xFF).toByte()
-                }
-            }
-
-            layerPixelsList.add(LayerPixels(red, green, blue, alpha, minY, minX, maxY, maxX))
         }
 
         // ── Layer Records ──
-        // 各レイヤーのチャンネルデータを RLE 圧縮して長さを事前計算
-        data class CompressedChannel(val data: ByteArray)
-
-        val allCompressed = ArrayList<List<CompressedChannel>>(layers.size)
-
-        for (i in layers.indices) {
-            val lp = layerPixelsList[i]
-            val lw = lp.right - lp.left
-            val lh = lp.bottom - lp.top
-            val channels = listOf(lp.alpha, lp.red, lp.green, lp.blue)
-            val compressed = channels.map { chData ->
-                CompressedChannel(compressRLE(chData, lw, lh))
-            }
-            allCompressed.add(compressed)
-        }
-
-        for (i in layers.indices) {
-            val layer = layers[i]
+        for (i in psdItems.indices) {
+            val item = psdItems[i]
             val lp = layerPixelsList[i]
             val compressed = allCompressed[i]
 
@@ -143,67 +176,68 @@ object PsdExporter {
             // Channel count
             out.writeShort(4) // A, R, G, B
 
-            // Channel info: id + data length (compression type 2 bytes + compressed data)
-            val chIds = intArrayOf(-1, 0, 1, 2) // alpha, red, green, blue
+            // Channel info
+            val chIds = intArrayOf(-1, 0, 1, 2)
             for (c in 0 until 4) {
                 out.writeShort(chIds[c])
                 out.writeInt(compressed[c].data.size + 2) // +2 for compression type
             }
 
-            // Blend mode signature
-            out.writeInt(0x3842494D) // "8BIM"
-            // Blend mode key
-            out.writeBytes(blendModeToKey(layer.blendMode))
-            // Opacity
-            out.writeByte((layer.opacity * 255f).toInt().coerceIn(0, 255))
-            // Clipping
-            out.writeByte(if (layer.isClipToBelow) 1 else 0)
-            // Flags
-            var flags = 0
-            if (!layer.isVisible) flags = flags or 0x02
-            out.writeByte(flags)
-            // Filler
-            out.writeByte(0)
+            when (item) {
+                is PsdLayerItem.Regular -> {
+                    val layer = item.layer
+                    // Blend mode signature
+                    out.writeInt(0x3842494D) // "8BIM"
+                    out.writeBytes(blendModeToKey(layer.blendMode))
+                    // Opacity
+                    out.writeByte((layer.opacity * 255f).toInt().coerceIn(0, 255))
+                    // Clipping
+                    out.writeByte(if (layer.isClipToBelow) 1 else 0)
+                    // Flags
+                    var flags = 0
+                    if (!layer.isVisible) flags = flags or 0x02
+                    out.writeByte(flags)
+                    out.writeByte(0) // Filler
 
-            // Extra data length
-            val layerName = layer.name
-            val nameBytes = layerName.toByteArray(Charsets.ISO_8859_1)
-            // Pascal string: 1 byte length + name + padding to 4-byte boundary
-            val pascalLen = 1 + nameBytes.size
-            val paddedPascalLen = ((pascalLen + 3) / 4) * 4
+                    // Extra data
+                    writeLayerExtraData(out, buf, layer.name, null)
+                }
+                is PsdLayerItem.GroupStart -> {
+                    val group = item.group
+                    // Blend mode: pass-through for groups
+                    out.writeInt(0x3842494D) // "8BIM"
+                    out.writeBytes(blendModeToKey(group.blendMode))
+                    // Opacity
+                    out.writeByte((group.opacity * 255f).toInt().coerceIn(0, 255))
+                    // Clipping
+                    out.writeByte(0)
+                    // Flags
+                    var flags = 0
+                    if (!group.isVisible) flags = flags or 0x02
+                    out.writeByte(flags)
+                    out.writeByte(0) // Filler
 
-            // luni block size: 4 (sig) + 4 (key) + 4 (len) + 4 (unicode len) + name.length * 2
-            val luniDataLen = 4 + layerName.length * 2
-            val luniBlockLen = 4 + 4 + 4 + luniDataLen
+                    // lsct type: 1=open folder, 2=closed folder
+                    val lsctType = if (group.isExpanded) 1 else 2
+                    writeLayerExtraData(out, buf, group.name, lsctType)
+                }
+                is PsdLayerItem.GroupEnd -> {
+                    // 終了マーカー: blend=norm, opacity=255, hidden
+                    out.writeInt(0x3842494D) // "8BIM"
+                    out.writeBytes("norm")
+                    out.writeByte(255) // Opacity
+                    out.writeByte(0) // Clipping
+                    out.writeByte(0x02) // Flags: hidden
+                    out.writeByte(0) // Filler
 
-            val extraLen = 4 + 4 + paddedPascalLen + luniBlockLen // mask(4) + blendRanges(4) + name + luni
-            out.writeInt(extraLen)
-
-            // Layer mask data length
-            out.writeInt(0)
-
-            // Layer blending ranges
-            out.writeInt(0)
-
-            // Layer name (Pascal string)
-            out.writeByte(nameBytes.size)
-            out.writeRawBytes(nameBytes)
-            // Padding
-            val pad = paddedPascalLen - pascalLen
-            for (p in 0 until pad) out.writeByte(0)
-
-            // Unicode name (luni)
-            out.writeInt(0x3842494D) // "8BIM"
-            out.writeBytes("luni")
-            out.writeInt(luniDataLen)
-            out.writeInt(layerName.length)
-            for (ch in layerName) {
-                out.writeShort(ch.code)
+                    // lsct type: 3=bounding section divider
+                    writeLayerExtraData(out, buf, "</Layer group>", 3)
+                }
             }
         }
 
         // ── Channel Image Data ──
-        for (i in layers.indices) {
+        for (i in psdItems.indices) {
             val compressed = allCompressed[i]
             for (c in 0 until 4) {
                 out.writeShort(1) // compression type: RLE
@@ -211,9 +245,13 @@ object PsdExporter {
             }
         }
 
-        // Layer info length を埋める
+        // Layer info length を埋める (偶数パディング)
         val layerInfoEnd = buf.size()
-        val layerInfoLen = layerInfoEnd - layerInfoLenPos - 4
+        var layerInfoLen = layerInfoEnd - layerInfoLenPos - 4
+        if (layerInfoLen % 2 != 0) {
+            out.writeByte(0) // pad to even
+            layerInfoLen++
+        }
         patchInt(buf, layerInfoLenPos, layerInfoLen)
 
         // Layer and Mask info length を埋める
@@ -222,10 +260,8 @@ object PsdExporter {
         patchInt(buf, layerMaskLenPos, layerMaskLen)
 
         // ── Image Data (composite) ──
-        // Photoshop は composite image data を必須とする
         out.writeShort(0) // compression: raw
         val composite = doc.getCompositePixels()
-        // R, G, B, A の順でチャンネルを書き出し
         for (ch in 0 until 4) {
             for (y in 0 until h) {
                 for (x in 0 until w) {
@@ -249,6 +285,145 @@ object PsdExporter {
         output.flush()
     }
 
+    /**
+     * PSD レイヤー順序を構築する。
+     * PSD はボトム→トップで格納:
+     *   非グループレイヤー (下位) ... GroupEnd → 子レイヤー → GroupStart ... 非グループレイヤー (上位)
+     *
+     * doc.layers は UI の下→上順（index 0 = 最下層）。
+     * グループの表示順は doc.layerGroups の LinkedHashMap 順。
+     */
+    private fun buildPsdLayerOrder(
+        layers: List<Layer>,
+        groups: Map<Int, LayerGroupInfo>,
+    ): List<PsdLayerItem> {
+        val result = ArrayList<PsdLayerItem>()
+
+        // グループに属さないレイヤー
+        val ungroupedLayers = layers.filter { it.groupId == 0 }
+
+        // グループごとの子レイヤー (layers 内の出現順を維持)
+        val groupChildren = LinkedHashMap<Int, MutableList<Layer>>()
+        for (g in groups.values) {
+            groupChildren[g.id] = mutableListOf()
+        }
+        for (layer in layers) {
+            if (layer.groupId != 0 && groupChildren.containsKey(layer.groupId)) {
+                groupChildren[layer.groupId]!!.add(layer)
+            }
+        }
+
+        // layers の順序に基づいて、グループの挿入位置を決定
+        // 各グループは「そのグループ内の最初のレイヤーの位置」に挿入する
+        // グループ内にレイヤーがない場合は、layerGroups の順序で末尾に配置
+
+        data class OrderedItem(val index: Int, val item: Any) // Any = Layer | Int(groupId)
+
+        val orderedItems = ArrayList<OrderedItem>()
+
+        // 各レイヤーの元のインデックスを記録
+        val processedGroups = HashSet<Int>()
+        for ((idx, layer) in layers.withIndex()) {
+            if (layer.groupId == 0) {
+                orderedItems.add(OrderedItem(idx, layer))
+            } else if (!processedGroups.contains(layer.groupId) && groups.containsKey(layer.groupId)) {
+                // このグループの最初の出現 → グループ全体をここに挿入
+                processedGroups.add(layer.groupId)
+                orderedItems.add(OrderedItem(idx, layer.groupId))
+            }
+        }
+
+        // レイヤーを持たないグループを末尾に追加
+        for (g in groups.values) {
+            if (!processedGroups.contains(g.id)) {
+                orderedItems.add(OrderedItem(layers.size + g.id, g.id))
+            }
+        }
+
+        // PSD アイテムリストを構築
+        for (oi in orderedItems) {
+            when (val obj = oi.item) {
+                is Layer -> {
+                    result.add(PsdLayerItem.Regular(obj))
+                }
+                is Int -> {
+                    val groupId = obj
+                    val group = groups[groupId] ?: continue
+                    val children = groupChildren[groupId] ?: emptyList()
+                    // PSD 順序: GroupEnd → 子レイヤー → GroupStart
+                    result.add(PsdLayerItem.GroupEnd(group))
+                    for (child in children) {
+                        result.add(PsdLayerItem.Regular(child))
+                    }
+                    result.add(PsdLayerItem.GroupStart(group))
+                }
+            }
+        }
+
+        return result
+    }
+
+    /**
+     * レイヤーの Extra Data セクションを書き込む。
+     * @param lsctType null=通常レイヤー、1=open folder、2=closed folder、3=bounding section divider
+     */
+    private fun writeLayerExtraData(
+        out: PsdOutputStream,
+        buf: ByteArrayOutputStream,
+        layerName: String,
+        lsctType: Int?,
+    ) {
+        val nameBytes = layerName.toByteArray(Charsets.ISO_8859_1)
+        val pascalLen = 1 + nameBytes.size
+        val paddedPascalLen = ((pascalLen + 3) / 4) * 4
+
+        // luni block
+        val luniDataLen = 4 + layerName.length * 2
+        val luniBlockLen = 4 + 4 + 4 + luniDataLen
+
+        // lsct block (if group marker)
+        // lsct: 4(sig) + 4(key) + 4(len) + 4(type) [+ 4(sig) + 4(blend mode key)]
+        val lsctBlockLen = if (lsctType != null) {
+            4 + 4 + 4 + 12 // sig + key + len + (type + blend sig + blend key)
+        } else {
+            0
+        }
+
+        val extraLen = 4 + 4 + paddedPascalLen + luniBlockLen + lsctBlockLen
+        out.writeInt(extraLen)
+
+        // Layer mask data
+        out.writeInt(0)
+
+        // Layer blending ranges
+        out.writeInt(0)
+
+        // Layer name (Pascal string)
+        out.writeByte(nameBytes.size)
+        out.writeRawBytes(nameBytes)
+        val pad = paddedPascalLen - pascalLen
+        for (p in 0 until pad) out.writeByte(0)
+
+        // Unicode name (luni)
+        out.writeInt(0x3842494D) // "8BIM"
+        out.writeBytes("luni")
+        out.writeInt(luniDataLen)
+        out.writeInt(layerName.length)
+        for (ch in layerName) {
+            out.writeShort(ch.code)
+        }
+
+        // Section divider (lsct) — グループマーカーの場合のみ
+        if (lsctType != null) {
+            out.writeInt(0x3842494D) // "8BIM"
+            out.writeBytes("lsct")
+            out.writeInt(12) // data length: type(4) + blend sig(4) + blend key(4)
+            out.writeInt(lsctType)
+            out.writeInt(0x3842494D) // "8BIM"
+            out.writeBytes("pass") // pass-through blend mode for groups
+        }
+    }
+
     // ── RLE (PackBits) 圧縮 ──
 
     private fun compressRLE(data: ByteArray, w: Int, h: Int): ByteArray {
@@ -263,22 +438,18 @@ object PsdExporter {
             val rowBuf = ByteArrayOutputStream(w + w / 128 + 2)
             var x = 0
             while (x < w) {
-                // run を探す
                 var runLen = 1
                 while (x + runLen < w && runLen < 128 &&
                     data[rowOff + x + runLen] == data[rowOff + x]) {
                     runLen++
                 }
                 if (runLen >= 3) {
-                    // RLE run
                     rowBuf.write((-(runLen - 1)) and 0xFF)
                     rowBuf.write(data[rowOff + x].toInt() and 0xFF)
                     x += runLen
                 } else {
-                    // Literal run
                     var litLen = 1
                     while (x + litLen < w && litLen < 128) {
-                        // 次の 2 バイトが同じならリテラル終了 (run に切り替え)
                         if (x + litLen + 1 < w &&
                             data[rowOff + x + litLen] == data[rowOff + x + litLen + 1]) {
                             break
@@ -296,12 +467,10 @@ object PsdExporter {
             scanlineLens[y] = scanlineData[y].size
         }
 
-        // scanline byte counts (2 bytes each)
         for (y in 0 until h) {
             result.write((scanlineLens[y] shr 8) and 0xFF)
             result.write(scanlineLens[y] and 0xFF)
         }
-        // compressed data
         for (y in 0 until h) {
             result.write(scanlineData[y])
         }
@@ -324,7 +493,7 @@ object PsdExporter {
         PixelOps.BLEND_SOFT_LIGHT -> "sLit"
         PixelOps.BLEND_DIFFERENCE -> "diff"
         PixelOps.BLEND_EXCLUSION -> "smud"
-        PixelOps.BLEND_ADD -> "lddg" // Linear Dodge = Add
+        PixelOps.BLEND_ADD -> "lddg"
         PixelOps.BLEND_SUBTRACT -> "fsub"
         PixelOps.BLEND_LINEAR_BURN -> "lbrn"
         PixelOps.BLEND_LINEAR_LIGHT -> "lLit"
@@ -345,8 +514,6 @@ object PsdExporter {
         arr[pos + 1] = ((value shr 16) and 0xFF).toByte()
         arr[pos + 2] = ((value shr 8) and 0xFF).toByte()
         arr[pos + 3] = (value and 0xFF).toByte()
-        // ByteArrayOutputStream doesn't support random access,
-        // so we need to rebuild. Use the writable buffer approach instead.
         bos.reset()
         bos.write(arr)
     }

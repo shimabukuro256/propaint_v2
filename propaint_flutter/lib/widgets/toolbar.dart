@@ -151,7 +151,10 @@ class PaintToolbar extends StatelessWidget {
           // 矩形選択
           _ToolbarIcon(
             icon: Icons.crop_square_rounded,
-            onPressed: () => channel.setToolMode('SelectRect'),
+            onPressed: () {
+              channel.setToolMode('SelectRect');
+              onTogglePanel(PanelType.selection);
+            },
             isActive: state.toolMode == 'SelectRect',
             tooltip: '矩形選択',
           ),
@@ -159,7 +162,10 @@ class PaintToolbar extends StatelessWidget {
           // 楕円選択
           _ToolbarIcon(
             icon: Icons.circle_outlined,
-            onPressed: () => channel.setToolMode('SelectEllipse'),
+            onPressed: () {
+              channel.setToolMode('SelectEllipse');
+              onTogglePanel(PanelType.selection);
+            },
             isActive: state.toolMode == 'SelectEllipse',
             tooltip: '楕円選択',
           ),
@@ -167,7 +173,10 @@ class PaintToolbar extends StatelessWidget {
           // なげなわ選択
           _ToolbarIcon(
             icon: Icons.gesture_rounded,
-            onPressed: () => channel.setToolMode('SelectLasso'),
+            onPressed: () {
+              channel.setToolMode('SelectLasso');
+              onTogglePanel(PanelType.selection);
+            },
             isActive: state.toolMode == 'SelectLasso',
             tooltip: 'なげなわ選択',
           ),
@@ -175,7 +184,10 @@ class PaintToolbar extends StatelessWidget {
           // 自動選択
           _ToolbarIcon(
             icon: Icons.auto_fix_high_rounded,
-            onPressed: () => channel.setToolMode('SelectMagicWand'),
+            onPressed: () {
+              channel.setToolMode('SelectMagicWand');
+              onTogglePanel(PanelType.selection);
+            },
             isActive: state.toolMode == 'SelectMagicWand',
             tooltip: '自動選択',
           ),

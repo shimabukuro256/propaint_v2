@@ -104,6 +104,47 @@ class TransformPanel extends StatelessWidget {
             ),
           ),
 
+          const SizedBox(height: 8),
+
+          // ディストート・ワープ
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 0, 14, 2),
+            child: Text('変形モード', style: TextStyle(color: C.textSecondary, fontSize: 11)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _TransformButton(
+                        icon: Icons.open_with_rounded,
+                        label: 'ユニフォーム',
+                        onTap: () => channel.transformLayer(scaleX: 1.0, scaleY: 1.0),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _TransformButton(
+                        icon: Icons.crop_free_rounded,
+                        label: 'リキファイ',
+                        onTap: () {
+                          channel.setToolMode('Liquify');
+                          channel.beginLiquify();
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
           const SizedBox(height: 10),
         ],
       ),

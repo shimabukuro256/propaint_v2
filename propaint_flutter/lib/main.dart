@@ -69,11 +69,19 @@ class _PaintScaffoldState extends State<PaintScaffold> {
   @override
   void initState() {
     super.initState();
+    // ネイティブからのジェスチャ通知を受信（先に登録）
+    _channel.onNativeGesture = _onNativeGesture;
+
+    // プラットフォーム側の初期化を待つため、フレーム後に遅延実行
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _initializeChannels();
+    });
+  }
+
+  void _initializeChannels() {
     _stateSub = _channel.stateStream.listen(_onStateUpdate);
     _channel.getState().then(_onStateUpdate);
-
-    // ネイティブからのジェスチャ通知を受信
-    _channel.onNativeGesture = _onNativeGesture;
   }
 
   @override

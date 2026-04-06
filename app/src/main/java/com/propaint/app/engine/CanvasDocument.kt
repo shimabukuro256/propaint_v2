@@ -1376,6 +1376,16 @@ class CanvasDocument(val width: Int, val height: Int) {
         group
     }
 
+    /**
+     * PSD インポート用: 外部からグループを直接登録する。
+     * nextGroupId も更新して ID 衝突を防ぐ。
+     */
+    fun importLayerGroup(group: LayerGroupInfo) = lock.withLock {
+        _layerGroups[group.id] = group
+        if (group.id >= nextGroupId) nextGroupId = group.id + 1
+        PaintDebug.d(PaintDebug.Layer) { "[importLayerGroup] id=${group.id} name=${group.name}" }
+    }
+
     fun deleteLayerGroup(groupId: Int) = lock.withLock {
         _layerGroups.remove(groupId)
         // グループ内のレイヤーをグループ解除
@@ -1466,6 +1476,250 @@ class CanvasDocument(val width: Int, val height: Int) {
         PaintDebug.d(PaintDebug.Layer) { "[addMaskFromSelection] layerId=$layerId" }
     }
 
+    // ── 選択範囲操作 ──────────────────────────────────────────────
+
+    /** 選択範囲内のピクセルを削除（透明にする） */
+    fun deleteSelection(layerId: Int) = lock.withLock {
+        if (!selectionManager.hasSelection) return
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        val mask = selectionManager.mask ?: return
+        val w = width; val h = height
+        for (ty in 0 until layer.content.tilesY) {
+            for (tx in 0 until layer.content.tilesX) {
+                layer.content.tiles[ty * layer.content.tilesX + tx] ?: continue
+                val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+                val mutable = layer.content.getOrCreateMutable(tx, ty)
+                for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        val maskVal = mask[py * w + px].toInt() and 0xFF
+                        if (maskVal > 0) {
+                            val idx = ly * Tile.SIZE + lx
+                            if (maskVal >= 255) {
+                                mutable.pixels[idx] = 0
+                            } else {
+                                // 部分選択: アルファをマスク値で減算
+                                val orig = mutable.pixels[idx]
+                                if (orig != 0) {
+                                    val factor = (255 - maskVal) / 255f
+                                    val a = (PixelOps.alpha(orig) * factor).toInt().coerceIn(0, 255)
+                                    val r = (PixelOps.red(orig) * factor).toInt().coerceIn(0, a)
+                                    val g = (PixelOps.green(orig) * factor).toInt().coerceIn(0, a)
+                                    val b = (PixelOps.blue(orig) * factor).toInt().coerceIn(0, a)
+                                    mutable.pixels[idx] = PixelOps.pack(a, r, g, b)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[deleteSelection] layerId=$layerId" }
+    }
+
+    /** 選択範囲内を指定色で塗りつぶす */
+    fun fillSelection(layerId: Int, color: Int) = lock.withLock {
+        if (!selectionManager.hasSelection) return
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        val mask = selectionManager.mask ?: return
+        val premulColor = PixelOps.premultiply(color)
+        val w = width; val h = height
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val maskVal = mask[y * w + x].toInt() and 0xFF
+                if (maskVal == 0) continue
+                val tx = x / Tile.SIZE; val ty = y / Tile.SIZE
+                val tile = layer.content.getOrCreateMutable(tx, ty)
+                val lx = x - tx * Tile.SIZE; val ly = y - ty * Tile.SIZE
+                val idx = ly * Tile.SIZE + lx
+                if (maskVal >= 255) {
+                    tile.pixels[idx] = premulColor
+                } else {
+                    // 部分選択: マスク値でブレンド
+                    val existing = tile.pixels[idx]
+                    tile.pixels[idx] = PixelOps.blendSrcOverOpacity(existing, premulColor, maskVal)
+                }
+            }
+        }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[fillSelection] layerId=$layerId color=${Integer.toHexString(color)}" }
+    }
+
+    /** 選択範囲内のピクセルを新規レイヤーにコピー */
+    fun copySelection(layerId: Int): Layer? = lock.withLock {
+        if (!selectionManager.hasSelection) return null
+        val layer = _layers.find { it.id == layerId } ?: return null
+        val mask = selectionManager.mask ?: return null
+        val w = width; val h = height
+        val newLayer = Layer(nextLayerId++, "${layer.name} コピー", TiledSurface(w, h))
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val maskVal = mask[y * w + x].toInt() and 0xFF
+                if (maskVal == 0) continue
+                val pixel = layer.content.getPixelAt(x, y)
+                if (pixel == 0) continue
+                val tx = x / Tile.SIZE; val ty = y / Tile.SIZE
+                val tile = newLayer.content.getOrCreateMutable(tx, ty)
+                val lx = x - tx * Tile.SIZE; val ly = y - ty * Tile.SIZE
+                if (maskVal >= 255) {
+                    tile.pixels[ly * Tile.SIZE + lx] = pixel
+                } else {
+                    val factor = maskVal / 255f
+                    val a = (PixelOps.alpha(pixel) * factor).toInt().coerceIn(0, 255)
+                    val r = (PixelOps.red(pixel) * factor).toInt().coerceIn(0, a)
+                    val g = (PixelOps.green(pixel) * factor).toInt().coerceIn(0, a)
+                    val b = (PixelOps.blue(pixel) * factor).toInt().coerceIn(0, a)
+                    tile.pixels[ly * Tile.SIZE + lx] = PixelOps.pack(a, r, g, b)
+                }
+            }
+        }
+        val insertIdx = _layers.indexOf(layer) + 1
+        _layers.add(insertIdx, newLayer)
+        activeLayerId = newLayer.id
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[copySelection] from=${layer.id} new=${newLayer.id}" }
+        return newLayer
+    }
+
+    /** 選択範囲内のピクセルを切り取って新規レイヤーに移動 */
+    fun cutSelection(layerId: Int): Layer? = lock.withLock {
+        if (!selectionManager.hasSelection) return null
+        val layer = _layers.find { it.id == layerId } ?: return null
+        if (layer.isLocked) return null
+        pushUndoTileDelta(layer)
+        val newLayer = copySelection(layerId) ?: return null
+        // 元レイヤーから選択範囲内のピクセルを削除
+        val mask = selectionManager.mask ?: return newLayer
+        val w = width; val h = height
+        for (ty in 0 until layer.content.tilesY) {
+            for (tx in 0 until layer.content.tilesX) {
+                layer.content.tiles[ty * layer.content.tilesX + tx] ?: continue
+                val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+                val mutable = layer.content.getOrCreateMutable(tx, ty)
+                for (ly in 0 until Tile.SIZE) {
+                    val py = by + ly; if (py >= h) break
+                    for (lx in 0 until Tile.SIZE) {
+                        val px = bx + lx; if (px >= w) break
+                        val maskVal = mask[py * w + px].toInt() and 0xFF
+                        if (maskVal > 0) {
+                            val idx = ly * Tile.SIZE + lx
+                            if (maskVal >= 255) {
+                                mutable.pixels[idx] = 0
+                            } else {
+                                val orig = mutable.pixels[idx]
+                                if (orig != 0) {
+                                    val factor = (255 - maskVal) / 255f
+                                    val a = (PixelOps.alpha(orig) * factor).toInt().coerceIn(0, 255)
+                                    val r = (PixelOps.red(orig) * factor).toInt().coerceIn(0, a)
+                                    val g = (PixelOps.green(orig) * factor).toInt().coerceIn(0, a)
+                                    val b = (PixelOps.blue(orig) * factor).toInt().coerceIn(0, a)
+                                    mutable.pixels[idx] = PixelOps.pack(a, r, g, b)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[cutSelection] from=${layer.id} new=${newLayer.id}" }
+        return newLayer
+    }
+
+    /** 選択範囲内のピクセルを平行移動 */
+    fun moveSelection(layerId: Int, dx: Int, dy: Int) = lock.withLock {
+        if (!selectionManager.hasSelection) return
+        if (dx == 0 && dy == 0) return
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        pushUndoTileDelta(layer)
+        val mask = selectionManager.mask ?: return
+        val w = width; val h = height
+
+        // 選択範囲内のピクセルを抽出
+        val extracted = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val maskVal = mask[y * w + x].toInt() and 0xFF
+                if (maskVal == 0) continue
+                val pixel = layer.content.getPixelAt(x, y)
+                if (pixel == 0) continue
+                if (maskVal >= 255) {
+                    extracted[y * w + x] = pixel
+                } else {
+                    val factor = maskVal / 255f
+                    val a = (PixelOps.alpha(pixel) * factor).toInt().coerceIn(0, 255)
+                    val r = (PixelOps.red(pixel) * factor).toInt().coerceIn(0, a)
+                    val g = (PixelOps.green(pixel) * factor).toInt().coerceIn(0, a)
+                    val b = (PixelOps.blue(pixel) * factor).toInt().coerceIn(0, a)
+                    extracted[y * w + x] = PixelOps.pack(a, r, g, b)
+                }
+            }
+        }
+
+        // 元レイヤーから選択範囲内を消去
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val maskVal = mask[y * w + x].toInt() and 0xFF
+                if (maskVal == 0) continue
+                val tx = x / Tile.SIZE; val ty = y / Tile.SIZE
+                layer.content.tiles[ty * layer.content.tilesX + tx] ?: continue
+                val mutable = layer.content.getOrCreateMutable(tx, ty)
+                val lx = x - tx * Tile.SIZE; val ly = y - ty * Tile.SIZE
+                val idx = ly * Tile.SIZE + lx
+                if (maskVal >= 255) {
+                    mutable.pixels[idx] = 0
+                } else {
+                    val orig = mutable.pixels[idx]
+                    if (orig != 0) {
+                        val factor = (255 - maskVal) / 255f
+                        val a = (PixelOps.alpha(orig) * factor).toInt().coerceIn(0, 255)
+                        val r = (PixelOps.red(orig) * factor).toInt().coerceIn(0, a)
+                        val g = (PixelOps.green(orig) * factor).toInt().coerceIn(0, a)
+                        val b = (PixelOps.blue(orig) * factor).toInt().coerceIn(0, a)
+                        mutable.pixels[idx] = PixelOps.pack(a, r, g, b)
+                    }
+                }
+            }
+        }
+
+        // 移動先に書き込み
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val pixel = extracted[y * w + x]
+                if (pixel == 0) continue
+                val nx = x + dx; val ny = y + dy
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+                val tx = nx / Tile.SIZE; val ty = ny / Tile.SIZE
+                val tile = layer.content.getOrCreateMutable(tx, ty)
+                val lx = nx - tx * Tile.SIZE; val ly = ny - ty * Tile.SIZE
+                tile.pixels[ly * Tile.SIZE + lx] = pixel
+            }
+        }
+
+        // 選択マスクも移動
+        val newMask = ByteArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val v = mask[y * w + x]
+                if (v.toInt() == 0) continue
+                val nx = x + dx; val ny = y + dy
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+                newMask[ny * w + nx] = v
+            }
+        }
+        selectionManager.setMask(newMask)
+
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[moveSelection] layerId=$layerId dx=$dx dy=$dy" }
+    }
+
     // ── 変形操作 ────────────────────────────────────────────────
 
     fun transformLayer(
@@ -1514,6 +1768,46 @@ class CanvasDocument(val width: Int, val height: Int) {
             TransformManager.rotate90CW(layer.content, selMask)
         }
         dirtyTracker.markFullRebuild()
+    }
+
+    /** ディストート（パースペクティブ変形） */
+    fun distortLayer(layerId: Int, corners: FloatArray) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.distort(layer.content, corners, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    /** メッシュワープ変形 */
+    fun meshWarpLayer(layerId: Int, gridW: Int, gridH: Int, nodes: FloatArray) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val selMask = getSelectionMaskForTransform()
+        applyTransformWithSelection(layer) {
+            TransformManager.meshWarp(layer.content, gridW, gridH, nodes, selMask)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    /** リキファイ（ゆがみ） */
+    fun liquifyLayer(layerId: Int, cx: Float, cy: Float, radius: Float,
+                     dirX: Float, dirY: Float, pressure: Float, mode: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        if (layer.isLocked) return
+        val selMask = getSelectionMaskForTransform()
+        TransformManager.liquify(layer.content, cx, cy, radius, dirX, dirY, pressure, mode, selMask)
+        dirtyTracker.markFullRebuild()
+    }
+
+    /** リキファイ開始 (Undo 用スナップショット) */
+    fun beginLiquify(layerId: Int) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
     }
 
     /**

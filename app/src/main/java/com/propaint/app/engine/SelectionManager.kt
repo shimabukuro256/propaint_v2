@@ -23,6 +23,14 @@ class SelectionManager(val width: Int, val height: Int) {
     /** 選択が存在するか */
     val hasSelection: Boolean get() = _mask != null
 
+    /** 外部からマスクを直接設定（移動操作等） */
+    fun setMask(newMask: ByteArray?) {
+        if (newMask != null) {
+            require(newMask.size == width * height) { "mask size mismatch: ${newMask.size} != ${width * height}" }
+        }
+        _mask = newMask
+    }
+
     /** マスクの指定座標の値を取得 (0..255) */
     fun getMaskValue(x: Int, y: Int): Int {
         if (x < 0 || x >= width || y < 0 || y >= height) return 0

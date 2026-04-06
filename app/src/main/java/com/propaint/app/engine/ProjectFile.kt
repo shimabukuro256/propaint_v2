@@ -48,9 +48,24 @@ object ProjectFile {
                     put("isLocked", layer.isLocked)
                     put("isClipToBelow", layer.isClipToBelow)
                     put("isAlphaLocked", layer.isAlphaLocked)
+                    put("groupId", layer.groupId)
                 })
             }
             put("layers", layersJson)
+
+            // レイヤーグループ情報
+            val groupsJson = JSONArray()
+            for (group in doc.layerGroups.values) {
+                groupsJson.put(JSONObject().apply {
+                    put("id", group.id)
+                    put("name", group.name)
+                    put("isExpanded", group.isExpanded)
+                    put("isVisible", group.isVisible)
+                    put("opacity", group.opacity.toDouble())
+                    put("blendMode", group.blendMode)
+                })
+            }
+            put("groups", groupsJson)
         }
 
         // meta.json 書き込み
@@ -161,6 +176,7 @@ object ProjectFile {
             val isLocked = lj.optBoolean("isLocked", false)
             val isClip = lj.optBoolean("isClipToBelow", false)
             val isAlphaLocked = lj.optBoolean("isAlphaLocked", false)
+            val groupId = lj.optInt("groupId", 0)
 
             // レイヤーPNG読み込み
             val pngBytes = entries["layer_${id}.png"]
@@ -184,6 +200,7 @@ object ProjectFile {
             }
 
             val layer = Layer(id, name, surface, opacity, blendMode, isVisible, isLocked, isClip, isAlphaLocked)
+            layer.groupId = groupId
             loadedLayers.add(layer)
         }
 
@@ -194,6 +211,27 @@ object ProjectFile {
 
         // doc の内部状態を直接差し替え
         doc.replaceAllLayers(loadedLayers, activeLayerId, maxId + 1)
+
+        // レイヤーグループを復元
+        val groupsJson = meta.optJSONArray("groups")
+        if (groupsJson != null) {
+            for (i in 0 until groupsJson.length()) {
+                val gj = groupsJson.optJSONObject(i) ?: continue
+                val group = LayerGroupInfo(
+                    id = gj.optInt("id", 0),
+                    name = gj.optString("name", "フォルダ"),
+                    isExpanded = gj.optBoolean("isExpanded", true),
+                    isVisible = gj.optBoolean("isVisible", true),
+                    opacity = gj.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+                    blendMode = gj.optInt("blendMode", 0),
+                )
+                if (group.id > 0) {
+                    doc.importLayerGroup(group)
+                }
+            }
+            PaintDebug.d(PaintDebug.Layer) { "[ProjectFile.load] restored ${groupsJson.length()} groups" }
+        }
+
         return doc
     }
 

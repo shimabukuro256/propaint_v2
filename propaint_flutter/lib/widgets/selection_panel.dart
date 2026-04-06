@@ -24,9 +24,24 @@ class SelectionPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 10, 14, 6),
-            child: Text('選択', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
+          // ヘッダー（閉じるボタン付き）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 6, 6),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('選択', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    icon: const Icon(Icons.close, size: 16, color: C.iconDefault),
+                    onPressed: onClose,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
+            ),
           ),
 
           // 選択ツール切替
@@ -40,37 +55,25 @@ class SelectionPanel extends StatelessWidget {
                   icon: Icons.crop_square_rounded,
                   label: '矩形',
                   isActive: toolMode == 'SelectRect',
-                  onTap: () {
-                    channel.setToolMode('SelectRect');
-                    onClose?.call();
-                  },
+                  onTap: () => channel.setToolMode('SelectRect'),
                 ),
                 _ToolChip(
                   icon: Icons.circle_outlined,
                   label: '楕円',
                   isActive: toolMode == 'SelectEllipse',
-                  onTap: () {
-                    channel.setToolMode('SelectEllipse');
-                    onClose?.call();
-                  },
+                  onTap: () => channel.setToolMode('SelectEllipse'),
                 ),
                 _ToolChip(
                   icon: Icons.gesture_rounded,
                   label: 'なげなわ',
                   isActive: toolMode == 'SelectLasso',
-                  onTap: () {
-                    channel.setToolMode('SelectLasso');
-                    onClose?.call();
-                  },
+                  onTap: () => channel.setToolMode('SelectLasso'),
                 ),
                 _ToolChip(
                   icon: Icons.auto_fix_high_rounded,
                   label: '自動選択',
                   isActive: toolMode == 'SelectMagicWand',
-                  onTap: () {
-                    channel.setToolMode('SelectMagicWand');
-                    onClose?.call();
-                  },
+                  onTap: () => channel.setToolMode('SelectMagicWand'),
                 ),
               ],
             ),
@@ -78,7 +81,7 @@ class SelectionPanel extends StatelessWidget {
 
           const Divider(color: C.border, height: 1, indent: 12, endIndent: 12),
 
-          // 操作ボタン
+          // 選択操作ボタン
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             child: Wrap(
@@ -93,6 +96,35 @@ class SelectionPanel extends StatelessWidget {
                 _ActionChip(
                   label: '反転',
                   onTap: hasSelection ? channel.invertSelection : null,
+                ),
+              ],
+            ),
+          ),
+
+          const Divider(color: C.border, height: 1, indent: 12, endIndent: 12),
+
+          // 編集操作ボタン
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                _ActionChip(
+                  label: 'コピー',
+                  onTap: hasSelection ? channel.copySelection : null,
+                ),
+                _ActionChip(
+                  label: '切り取り',
+                  onTap: hasSelection ? channel.cutSelection : null,
+                ),
+                _ActionChip(
+                  label: '削除',
+                  onTap: hasSelection ? channel.deleteSelection : null,
+                ),
+                _ActionChip(
+                  label: '塗りつぶし',
+                  onTap: hasSelection ? () => channel.fillSelection(state.currentColor) : null,
                 ),
               ],
             ),
