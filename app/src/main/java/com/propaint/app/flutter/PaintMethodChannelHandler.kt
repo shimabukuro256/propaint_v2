@@ -391,6 +391,14 @@ class PaintMethodChannelHandler(
                 val dy = call.argument<Int>("dy") ?: 0
                 viewModel.moveSelection(dx, dy); result.success(null)
             }
+            "featherSelection" -> {
+                val radius = call.argument<Int>("radius") ?: 5
+                viewModel.featherSelection(radius); result.success(null)
+            }
+            "expandSelection" -> {
+                val amount = call.argument<Int>("amount") ?: 5
+                viewModel.expandSelection(amount); result.success(null)
+            }
 
             // ── 変形 ──
             "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }

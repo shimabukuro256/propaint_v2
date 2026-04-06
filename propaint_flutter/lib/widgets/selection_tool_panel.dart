@@ -46,6 +46,70 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
     }
   }
 
+  /// アクション実行: Feather（ぼかし）
+  void _onFeather() {
+    widget.channel.featherSelection(5); // デフォルト半径 5px
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('選択範囲をぼかしました')),
+    );
+  }
+
+  /// アクション実行: Move（移動）
+  void _onMove() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('選択範囲内のピクセルをドラッグで移動します')),
+    );
+  }
+
+  /// アクション実行: Delete（削除）
+  void _onDelete() {
+    widget.channel.deleteSelection();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('選択範囲を削除しました')),
+    );
+  }
+
+  /// アクションボタンを構築（確定不要な操作向け）
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return Tooltip(
+      message: label,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: C.border.withAlpha(100), width: 1),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 16, color: C.iconDefault),
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: C.textSecondary,
+                    fontWeight: FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// モードボタンを構築
   Widget _buildModeButton({
     required String mode,
@@ -232,6 +296,30 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
                     setState(() => _activeMode = 'copy');
                     _startPixelCopy();
                   },
+                ),
+                const SizedBox(width: 4),
+
+                // Feather
+                _buildActionButton(
+                  icon: Icons.blur_on,
+                  label: 'Feather',
+                  onPressed: _onFeather,
+                ),
+                const SizedBox(width: 4),
+
+                // Move
+                _buildActionButton(
+                  icon: Icons.pan_tool,
+                  label: 'Move',
+                  onPressed: _onMove,
+                ),
+                const SizedBox(width: 4),
+
+                // Delete
+                _buildActionButton(
+                  icon: Icons.delete_sweep,
+                  label: 'Delete',
+                  onPressed: _onDelete,
                 ),
               ],
             ),

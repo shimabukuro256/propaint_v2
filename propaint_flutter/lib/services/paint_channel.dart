@@ -253,6 +253,14 @@ class PaintChannel {
   Future<void> cutSelection() => _method.invokeMethod('cutSelection');
   Future<void> moveSelection(int dx, int dy) => _method.invokeMethod('moveSelection', {'dx': dx, 'dy': dy});
 
+  /// 選択範囲をぼかす
+  /// @param radius: ぼかし半径（ピクセル）
+  Future<void> featherSelection(int radius) => _method.invokeMethod('featherSelection', {'radius': radius});
+
+  /// 選択範囲を拡張/縮小
+  /// @param amount: 正=拡張, 負=縮小（ピクセル）
+  Future<void> expandSelection(int amount) => _method.invokeMethod('expandSelection', {'amount': amount});
+
   // ─── ピクセルコピー変形（Word/Excel風）───────────────────
 
   /// 選択範囲のピクセルをコピーし、バウンディングボックスを返す
