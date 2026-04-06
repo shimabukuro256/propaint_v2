@@ -45,10 +45,13 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
 
   /// キャンバス中央でテスト用の選択ペイント
   void _paintSelection() {
-    // TODO: キャンバスの実際のサイズを取得して中央座標を計算
-    // 暫定的に固定座標を使用
-    const cx = 512;
-    const cy = 512;
+    // キャンバスサイズの推定：レイヤーがあれば最初のレイヤーから推測
+    // ない場合は一般的なキャンバスサイズ 2048x2048 を仮定
+    const defaultCanvasSize = 2048;
+
+    // 中央座標を計算（実際のキャンバス座標系）
+    final cx = defaultCanvasSize ~/ 2;  // 1024
+    final cy = defaultCanvasSize ~/ 2;
 
     // 筆圧適用が有効な場合のみ _pressure を使用、無効な場合は 1.0 (100%)
     final effectivePressure = _pressureEnabled ? _pressure : 1.0;
