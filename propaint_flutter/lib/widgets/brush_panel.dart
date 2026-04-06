@@ -100,6 +100,16 @@ class BrushPanel extends StatelessWidget {
               onChanged: (v) => channel.setStabilizer(v),
             ),
 
+            // 最小ブラシサイズ
+            PanelSlider(
+              label: '最小サイズ',
+              value: '${state.minBrushSizePercent}%',
+              current: state.minBrushSizePercent.toDouble(),
+              min: 1,
+              max: 100,
+              onChanged: (v) => channel.setBrushMinSizePercent(v.toInt()),
+            ),
+
             // ブラシ固有パラメータ
             if (info.hasColorStretch)
               PanelSlider(

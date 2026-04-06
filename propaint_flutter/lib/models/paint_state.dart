@@ -9,6 +9,7 @@ class PaintState {
   final double brushDensity;
   final double brushSpacing;
   final double stabilizer;
+  final int minBrushSizePercent;
   final double colorStretch;
   final double waterContent;
   final double blurStrength;
@@ -34,6 +35,7 @@ class PaintState {
     this.brushDensity = 1.0,
     this.brushSpacing = 0.06,
     this.stabilizer = 0.0,
+    this.minBrushSizePercent = 20,
     this.colorStretch = 0.0,
     this.waterContent = 0.0,
     this.blurStrength = 0.05,
@@ -61,6 +63,7 @@ class PaintState {
       brushDensity: (m['brushDensity'] as num?)?.toDouble() ?? brushDensity,
       brushSpacing: (m['brushSpacing'] as num?)?.toDouble() ?? brushSpacing,
       stabilizer: (m['stabilizer'] as num?)?.toDouble() ?? stabilizer,
+      minBrushSizePercent: (m['minBrushSizePercent'] as num?)?.toInt() ?? minBrushSizePercent,
       colorStretch: (m['colorStretch'] as num?)?.toDouble() ?? colorStretch,
       waterContent: (m['waterContent'] as num?)?.toDouble() ?? waterContent,
       blurStrength: (m['blurStrength'] as num?)?.toDouble() ?? blurStrength,

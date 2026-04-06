@@ -122,6 +122,13 @@ class PaintMethodChannelHandler(
                 viewModel.setBrushSpacing(v)
                 result.success(null)
             }
+            "setBrushMinSizePercent" -> {
+                val p = call.argument<Int>("percent")
+                    ?: return result.error("INVALID_ARG", "percent is required", null)
+                if (p !in 1..100) return result.error("INVALID_ARG", "percent must be in 1..100", null)
+                viewModel.setBrushMinSizePercent(p)
+                result.success(null)
+            }
             "setStabilizer" -> {
                 val v = call.argument<Double>("value")?.toFloat()
                     ?: return result.error("INVALID_ARG", "value is required", null)
@@ -371,6 +378,20 @@ class PaintMethodChannelHandler(
                 viewModel.paintSelectionErase(cx, cy, radius, pressure); result.success(null)
             }
 
+            // ── 選択範囲操作 ──
+            "deleteSelection" -> { viewModel.deleteSelection(); result.success(null) }
+            "fillSelection" -> {
+                val color = call.argument<Int>("color") ?: 0xFF000000.toInt()
+                viewModel.fillSelection(color); result.success(null)
+            }
+            "copySelection" -> { viewModel.copySelection(); result.success(null) }
+            "cutSelection" -> { viewModel.cutSelection(); result.success(null) }
+            "moveSelection" -> {
+                val dx = call.argument<Int>("dx") ?: 0
+                val dy = call.argument<Int>("dy") ?: 0
+                viewModel.moveSelection(dx, dy); result.success(null)
+            }
+
             // ── 変形 ──
             "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }
             "flipLayerV" -> { viewModel.flipActiveLayerV(); result.success(null) }
@@ -383,6 +404,32 @@ class PaintMethodChannelHandler(
                 val ty = call.argument<Double>("translateY")?.toFloat() ?: 0f
                 launchHeavy(result) { viewModel.transformActiveLayer(sx, sy, angle, tx, ty) }
             }
+            "distortLayer" -> {
+                val corners = call.argument<List<Double>>("corners")
+                if (corners == null || corners.size < 8) { result.error("INVALID", "corners required (8 values)", null); return }
+                val arr = FloatArray(8) { corners[it].toFloat() }
+                launchHeavy(result) { viewModel.distortActiveLayer(arr) }
+            }
+            "meshWarpLayer" -> {
+                val gridW = call.argument<Int>("gridW") ?: 3
+                val gridH = call.argument<Int>("gridH") ?: 3
+                val nodesList = call.argument<List<Double>>("nodes")
+                if (nodesList == null) { result.error("INVALID", "nodes required", null); return }
+                val nodes = FloatArray(nodesList.size) { nodesList[it].toFloat() }
+                launchHeavy(result) { viewModel.meshWarpActiveLayer(gridW, gridH, nodes) }
+            }
+            "beginLiquify" -> { viewModel.beginLiquify(); result.success(null) }
+            "liquifyLayer" -> {
+                val cx = call.argument<Double>("cx")?.toFloat() ?: 0f
+                val cy = call.argument<Double>("cy")?.toFloat() ?: 0f
+                val radius = call.argument<Double>("radius")?.toFloat() ?: 50f
+                val dirX = call.argument<Double>("dirX")?.toFloat() ?: 0f
+                val dirY = call.argument<Double>("dirY")?.toFloat() ?: 0f
+                val pressure = call.argument<Double>("pressure")?.toFloat() ?: 1f
+                val mode = call.argument<Int>("mode") ?: 0
+                viewModel.liquifyActiveLayer(cx, cy, radius, dirX, dirY, pressure, mode); result.success(null)
+            }
+            "endLiquify" -> { viewModel.endLiquify(); result.success(null) }
 
             // ── レイヤーマスク ──
             "addLayerMask" -> {

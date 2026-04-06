@@ -54,6 +54,11 @@ class PaintChannel {
     return _method.invokeMethod('setBrushSpacing', {'value': value});
   }
 
+  Future<void> setBrushMinSizePercent(int percent) {
+    assert(percent >= 1 && percent <= 100, 'minSizePercent must be in 1..100');
+    return _method.invokeMethod('setBrushMinSizePercent', {'percent': percent});
+  }
+
   Future<void> setStabilizer(double value) {
     assert(value >= 0.0 && value <= 1.0, 'stabilizer must be in 0..1');
     return _method.invokeMethod('setStabilizer', {'value': value});
@@ -240,6 +245,14 @@ class PaintChannel {
         'cx': cx, 'cy': cy, 'radius': radius, 'pressure': pressure,
       });
 
+  // ─── 選択範囲操作 ─────────────────────────────────────
+
+  Future<void> deleteSelection() => _method.invokeMethod('deleteSelection');
+  Future<void> fillSelection(int color) => _method.invokeMethod('fillSelection', {'color': color});
+  Future<void> copySelection() => _method.invokeMethod('copySelection');
+  Future<void> cutSelection() => _method.invokeMethod('cutSelection');
+  Future<void> moveSelection(int dx, int dy) => _method.invokeMethod('moveSelection', {'dx': dx, 'dy': dy});
+
   // ─── 変形ツール ───────────────────────────────────────
 
   Future<void> flipLayerH() => _method.invokeMethod('flipLayerH');
@@ -253,6 +266,29 @@ class PaintChannel {
     'scaleX': scaleX, 'scaleY': scaleY, 'angle': angle,
     'translateX': translateX, 'translateY': translateY,
   });
+
+  /// ディストート（パースペクティブ変形）
+  /// corners: [tlX, tlY, trX, trY, brX, brY, blX, blY]
+  Future<void> distortLayer(List<double> corners) =>
+      _method.invokeMethod('distortLayer', {'corners': corners});
+
+  /// メッシュワープ変形
+  Future<void> meshWarpLayer(int gridW, int gridH, List<double> nodes) =>
+      _method.invokeMethod('meshWarpLayer', {'gridW': gridW, 'gridH': gridH, 'nodes': nodes});
+
+  /// リキファイ開始 (Undo スナップショット)
+  Future<void> beginLiquify() => _method.invokeMethod('beginLiquify');
+
+  /// リキファイ適用 (mode: 0=Push, 1=TwirlCW, 2=TwirlCCW, 3=Pinch, 4=Expand)
+  Future<void> liquifyLayer(double cx, double cy, double radius,
+      double dirX, double dirY, {double pressure = 1.0, int mode = 0}) =>
+      _method.invokeMethod('liquifyLayer', {
+        'cx': cx, 'cy': cy, 'radius': radius,
+        'dirX': dirX, 'dirY': dirY, 'pressure': pressure, 'mode': mode,
+      });
+
+  /// リキファイ終了
+  Future<void> endLiquify() => _method.invokeMethod('endLiquify');
 
   // ─── レイヤーマスク ───────────────────────────────────
 

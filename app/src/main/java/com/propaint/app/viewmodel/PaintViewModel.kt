@@ -116,6 +116,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     val brushSpacing: StateFlow<Float> = _brushSpacing.asStateFlow()
     private val _brushStabilizer = MutableStateFlow(0.3f)
     val brushStabilizer: StateFlow<Float> = _brushStabilizer.asStateFlow()
+    private val _minBrushSizePercent = MutableStateFlow(20)
+    val minBrushSizePercent: StateFlow<Int> = _minBrushSizePercent.asStateFlow()
     private val _colorStretch = MutableStateFlow(0.5f)
     val colorStretch: StateFlow<Float> = _colorStretch.asStateFlow()
     private val _waterContent = MutableStateFlow(0f)
@@ -535,6 +537,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun setBrushHardness(v: Float) { _brushHardness.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setBrushDensity(v: Float) { _brushDensity.value = v.coerceIn(0.01f, 1f); persistCurrentBrush() }
     fun setBrushSpacing(v: Float) { _brushSpacing.value = v.coerceIn(0.01f, 2f); persistCurrentBrush() }
+    fun setBrushMinSizePercent(p: Int) { _minBrushSizePercent.value = p.coerceIn(1, 100); persistCurrentBrush() }
     fun setColorStretch(v: Float) { _colorStretch.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setWaterContent(v: Float) { _waterContent.value = v.coerceIn(0f, 1f); persistCurrentBrush() }
     fun setBlurStrength(v: Float) { _blurStrength.value = v.coerceIn(0.05f, 1f); persistCurrentBrush() }
@@ -800,6 +803,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             colorStretch = colStretch,
             antiAliasing = _brushAntiAliasing.value,
             stabilizer = _brushStabilizer.value,
+            minBrushSizePercent = _minBrushSizePercent.value,
             sublayerFilter = subFilter,
             filterRadiusScale = filterScale,
             blurPressureThreshold = blurPressThreshold,
