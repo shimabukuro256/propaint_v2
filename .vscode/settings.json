@@ -1,0 +1,14 @@
+{
+    "dart.flutterSdkPath": "C:\\tools\\flutter",
+    "[dart]": {
+        "editor.defaultFormatter": "Dart-Code.dart-code",
+        "editor.formatOnSave": true
+    },
+    "[kotlin]": {
+        "editor.defaultFormatter": "fwcd.kotlin",
+        "editor.formatOnSave": false
+    },
+    "gradle.nestedProjects": true,
+    "gradle.autoDetect": true,
+    "java.configuration.updateBuildConfiguration": "automatic"
+}

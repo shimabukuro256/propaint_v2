@@ -1,0 +1,80 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build:app:debug",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": [
+                "clean",
+                ":app:installDebug"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": {
+                "pattern": {
+                    "regexp": "^.*?(ERROR|error|Error).*?$",
+                    "line": 1
+                },
+                "background": {
+                    "activeOnStart": false,
+                    "beginsPattern": "^.*?Starting Android Gradle build.*?$",
+                    "endsPattern": "^.*?BUILD SUCCESSFUL.*?$|^.*?BUILD FAILED.*?$"
+                }
+            },
+            "isBackground": false
+        },
+        {
+            "label": "build:app:release",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": [
+                "clean",
+                ":app:assembleRelease"
+            ],
+            "group": {
+                "kind": "build"
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "flutter:pub:get",
+            "type": "shell",
+            "command": "flutter",
+            "args": [
+                "pub",
+                "get"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/propaint_flutter"
+            },
+            "group": {
+                "kind": "build"
+            }
+        },
+        {
+            "label": "gradle:clean",
+            "type": "shell",
+            "command": "./gradlew",
+            "args": [
+                "clean"
+            ],
+            "group": {
+                "kind": "build"
+            }
+        }
+    ]
+}

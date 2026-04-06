@@ -1,24 +1,73 @@
 {
-    // IntelliSense を使用して利用可能な属性を学べます。
-    // 既存の属性の説明をホバーして表示します。
-    // 詳細情報は次を確認してください: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "propaint_flutter",
+            "name": "🚀 ProPaint - Build & Run Debug",
+            "type": "shell",
+            "request": "launch",
+            "command": "./gradlew",
+            "args": [
+                "clean",
+                ":app:installDebug"
+            ],
+            "group": {
+                "kind": "debug",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "name": "📦 ProPaint - Build Release",
+            "type": "shell",
+            "request": "launch",
+            "command": "./gradlew",
+            "args": [
+                "clean",
+                ":app:assembleRelease"
+            ],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "name": "⚡ ProPaint - Build Debug (キャッシュ使用)",
+            "type": "shell",
+            "request": "launch",
+            "command": "./gradlew",
+            "args": [
+                ":app:installDebug"
+            ],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "name": "Flutter UI Debug",
             "cwd": "propaint_flutter",
             "request": "launch",
             "type": "dart"
         },
         {
-            "name": "propaint_flutter (profile mode)",
+            "name": "Flutter UI Profile",
             "cwd": "propaint_flutter",
             "request": "launch",
             "type": "dart",
             "flutterMode": "profile"
         },
         {
-            "name": "propaint_flutter (release mode)",
+            "name": "Flutter UI Release",
             "cwd": "propaint_flutter",
             "request": "launch",
             "type": "dart",
