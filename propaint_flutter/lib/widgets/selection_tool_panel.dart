@@ -9,12 +9,14 @@ class SelectionToolPanel extends StatefulWidget {
   final PaintState state;
   final PaintChannel channel;
   final VoidCallback onClose;
+  final Function(Map<String, int>)? onPixelCopyStarted;
 
   const SelectionToolPanel({
     super.key,
     required this.state,
     required this.channel,
     required this.onClose,
+    this.onPixelCopyStarted,
   });
 
   @override
@@ -91,8 +93,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   }
 
   /// ピクセルコピー変形を開始
-  void _startPixelCopy() {
-    // TODO: PixelCopyOverlay を表示するロジック
+  Future<void> _startPixelCopy() async {
     // 選択範囲がなければスナックバー表示
     if (!widget.state.hasSelection) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -101,8 +102,11 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
       return;
     }
 
-    // startPixelCopy を呼び出す
-    widget.channel.startPixelCopy();
+    // startPixelCopy を呼び出して境界情報を取得
+    final bounds = await widget.channel.startPixelCopy();
+    if (mounted && widget.onPixelCopyStarted != null) {
+      widget.onPixelCopyStarted!(bounds.cast<String, int>());
+    }
   }
 
   /// キャンバス中央でテスト用の選択ペイント

@@ -16,6 +16,7 @@ import 'widgets/selection_tool_panel.dart';
 import 'widgets/transform_panel.dart';
 import 'widgets/shape_text_panel.dart';
 import 'widgets/filter_panel.dart';
+import 'widgets/pixel_copy_overlay.dart';
 
 void main() => runApp(const ProPaintApp());
 
@@ -65,6 +66,9 @@ class _PaintScaffoldState extends State<PaintScaffold> {
   // ジェスチャ通知のオーバーレイ
   String? _gestureOverlayText;
   Timer? _gestureOverlayTimer;
+
+  // ピクセルコピー変形のオーバーレイ状態
+  Map<String, int>? _pixelCopyState; // {left, top, right, bottom}
 
   @override
   void initState() {
@@ -243,6 +247,9 @@ class _PaintScaffoldState extends State<PaintScaffold> {
                 state: _state,
                 channel: _channel,
                 onClose: _closePanel,
+                onPixelCopyStarted: (bounds) {
+                  setState(() => _pixelCopyState = bounds);
+                },
               ),
             ),
 
@@ -318,6 +325,19 @@ class _PaintScaffoldState extends State<PaintScaffold> {
                   ),
                 ),
               ),
+            ),
+
+          // ピクセルコピー変形オーバーレイ
+          if (_pixelCopyState != null)
+            PixelCopyOverlay(
+              left: _pixelCopyState!['left']!,
+              top: _pixelCopyState!['top']!,
+              width: _pixelCopyState!['right']! - _pixelCopyState!['left']!,
+              height: _pixelCopyState!['bottom']! - _pixelCopyState!['top']!,
+              channel: _channel,
+              onClose: () {
+                setState(() => _pixelCopyState = null);
+              },
             ),
         ],
       ),
