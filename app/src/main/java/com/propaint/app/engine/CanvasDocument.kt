@@ -2077,24 +2077,64 @@ class CanvasDocument(val width: Int, val height: Int) {
         val copyWidth = bounds.right - bounds.left
         val copyHeight = bounds.bottom - bounds.top
 
-        // 簡略実装：変形なし。実装時はバイリニア変換で対応
-        var pixIdx = 0
-        for (dy in 0 until copyHeight) {
-            for (dx in 0 until copyWidth) {
-                val pixelVal = buffer[pixIdx]
-                val px = x + dx
-                val py = y + dy
+        // スケール・回転に対応
+        if (scaleX == 1f && scaleY == 1f && rotation == 0f) {
+            // 高速パス：変形なし
+            var pixIdx = 0
+            for (dy in 0 until copyHeight) {
+                for (dx in 0 until copyWidth) {
+                    val pixelVal = buffer[pixIdx]
+                    val px = x + dx
+                    val py = y + dy
 
-                if (px in 0 until width && py in 0 until height) {
-                    val tileX = px / 64
-                    val tileY = py / 64
-                    val inTileX = px % 64
-                    val inTileY = py % 64
-                    val tileIndex = tileY * ((width + 63) / 64) + tileX
-                    val tile = layer.content.tiles.getOrNull(tileIndex)
-                    tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
+                    if (px in 0 until width && py in 0 until height) {
+                        val tileX = px / 64
+                        val tileY = py / 64
+                        val inTileX = px % 64
+                        val inTileY = py % 64
+                        val tileIndex = tileY * ((width + 63) / 64) + tileX
+                        val tile = layer.content.tiles.getOrNull(tileIndex)
+                        tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
+                    }
+                    pixIdx++
                 }
-                pixIdx++
+            }
+        } else {
+            // 変形処理：ソース座標を逆変換してサンプリング
+            val cosA = kotlin.math.cos(kotlin.math.PI * rotation / 180.0).toFloat()
+            val sinA = kotlin.math.sin(kotlin.math.PI * rotation / 180.0).toFloat()
+            val centerX = copyWidth / 2f
+            val centerY = copyHeight / 2f
+
+            for (dy in 0 until (copyHeight * scaleY).toInt()) {
+                for (dx in 0 until (copyWidth * scaleX).toInt()) {
+                    // デスト座標 → ソース座標への逆変換
+                    val relX = dx / scaleX - centerX
+                    val relY = dy / scaleY - centerY
+
+                    // 回転解除
+                    val srcRelX = relX * cosA + relY * sinA
+                    val srcRelY = -relX * sinA + relY * cosA
+                    val srcX = srcRelX + centerX
+                    val srcY = srcRelY + centerY
+
+                    if (srcX >= 0 && srcX < copyWidth && srcY >= 0 && srcY < copyHeight) {
+                        // バイリニア補間でソースピクセルをサンプリング
+                        val pixelVal = samplePixelBilinear(buffer, copyWidth, copyHeight, srcX, srcY)
+                        val px = x + dx
+                        val py = y + dy
+
+                        if (px in 0 until width && py in 0 until height) {
+                            val tileX = px / 64
+                            val tileY = py / 64
+                            val inTileX = px % 64
+                            val inTileY = py % 64
+                            val tileIndex = tileY * ((width + 63) / 64) + tileX
+                            val tile = layer.content.tiles.getOrNull(tileIndex)
+                            tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
+                        }
+                    }
+                }
             }
         }
 
@@ -2110,5 +2150,70 @@ class CanvasDocument(val width: Int, val height: Int) {
         pixelCopyBuffer = null
         pixelCopyBounds = null
         pixelCopyOriginalPixels = null
+    }
+
+    /** バイリニア補間でピクセルをサンプリング */
+    private fun samplePixelBilinear(
+        buffer: IntArray,
+        width: Int,
+        height: Int,
+        x: Float,
+        y: Float,
+    ): Int {
+        val xi = x.toInt()
+        val yi = y.toInt()
+        val xf = x - xi
+        val yf = y - yi
+
+        if (xi < 0 || xi >= width - 1 || yi < 0 || yi >= height - 1) {
+            // エッジケース：補間不可
+            return buffer.getOrNull(yi * width + xi) ?: 0
+        }
+
+        val p00 = buffer[yi * width + xi]
+        val p10 = buffer[yi * width + xi + 1]
+        val p01 = buffer[(yi + 1) * width + xi]
+        val p11 = buffer[(yi + 1) * width + xi + 1]
+
+        return blendPixels(p00, p10, p01, p11, xf, yf)
+    }
+
+    /** 4つのピクセルをバイリニア補間で混合 */
+    private fun blendPixels(p00: Int, p10: Int, p01: Int, p11: Int, xf: Float, yf: Float): Int {
+        // premultiplied ARGB の各成分を分離
+        val a00 = (p00 shr 24) and 0xFF
+        val a10 = (p10 shr 24) and 0xFF
+        val a01 = (p01 shr 24) and 0xFF
+        val a11 = (p11 shr 24) and 0xFF
+
+        val r00 = (p00 shr 16) and 0xFF
+        val r10 = (p10 shr 16) and 0xFF
+        val r01 = (p01 shr 16) and 0xFF
+        val r11 = (p11 shr 16) and 0xFF
+
+        val g00 = (p00 shr 8) and 0xFF
+        val g10 = (p10 shr 8) and 0xFF
+        val g01 = (p01 shr 8) and 0xFF
+        val g11 = (p11 shr 8) and 0xFF
+
+        val b00 = p00 and 0xFF
+        val b10 = p10 and 0xFF
+        val b01 = p01 and 0xFF
+        val b11 = p11 and 0xFF
+
+        // 各成分をバイリニア補間
+        val a = (a00 * (1 - xf) * (1 - yf) + a10 * xf * (1 - yf) +
+                 a01 * (1 - xf) * yf + a11 * xf * yf).toInt()
+        val r = (r00 * (1 - xf) * (1 - yf) + r10 * xf * (1 - yf) +
+                 r01 * (1 - xf) * yf + r11 * xf * yf).toInt()
+        val g = (g00 * (1 - xf) * (1 - yf) + g10 * xf * (1 - yf) +
+                 g01 * (1 - xf) * yf + g11 * xf * yf).toInt()
+        val b = (b00 * (1 - xf) * (1 - yf) + b10 * xf * (1 - yf) +
+                 b01 * (1 - xf) * yf + b11 * xf * yf).toInt()
+
+        return (a.coerceIn(0, 255) shl 24) or
+               (r.coerceIn(0, 255) shl 16) or
+               (g.coerceIn(0, 255) shl 8) or
+               b.coerceIn(0, 255)
     }
 }
