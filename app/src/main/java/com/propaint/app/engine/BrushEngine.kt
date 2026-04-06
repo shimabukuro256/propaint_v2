@@ -730,8 +730,19 @@ class BrushEngine(
             var contPx = sampleSource.getPixelAt(px, py)
             val idx = ly * w + lx
 
-            if (sm != null && sm.getMaskValue(px, py) < 255) {
-                subPx = 0; contPx = 0
+            // 選択範囲外のピクセルを処理: maskValue に応じてアルファを減衰（完全透明ではなく）
+            if (sm != null) {
+                val maskVal = sm.getMaskValue(px, py)
+                if (maskVal < 255) {
+                    // maskVal = 0 (非選択) → α = 0、maskVal = 254 → α ≈ 1%
+                    // 境界のアンチエイリアスをスムーズに保つ
+                    val fadeAlpha = maskVal / 255f
+                    val origAlpha = PixelOps.alpha(subPx)
+                    val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                    subPx = PixelOps.pack(newAlpha, PixelOps.red(subPx), PixelOps.green(subPx), PixelOps.blue(subPx))
+                    contPx = 0  // 背景は消す
+                    PaintDebug.d(PaintDebug.Brush) { "[blurAreaOnSurface] selection fade at ($px,$py) maskVal=$maskVal origA=$origAlpha newA=$newAlpha" }
+                }
             }
 
             val comp = PixelOps.blendSrcOver(contPx, subPx)

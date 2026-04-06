@@ -893,31 +893,55 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
-        // なげなわ選択 (SelectLasso): ドラッグでポリゴン頂点を蓄積
+        // なげなわ選択 (SelectLasso): ドラッグでポリゴン頂点を蓄積（複数ストローク対応）
         if (_toolMode.value == ToolMode.SelectLasso) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    _lassoPoints.clear()
-                    val (dx, dy) = screenToDoc(event.x, event.y)
-                    _lassoPoints.add(dx.toInt() to dy.toInt())
+                    // 最初のストロークなら新規開始、2回目以降なら続行
+                    if (_lassoPoints.isEmpty()) {
+                        val (dx, dy) = screenToDoc(event.x, event.y)
+                        _lassoPoints.add(dx.toInt() to dy.toInt())
+                        PaintDebug.d(PaintDebug.Input) { "[Lasso] stroke start, points=${_lassoPoints.size}" }
+                    } else {
+                        // 既にポイント蓄積中: 続行ストロークの最初のポイント（クリアしない）
+                        val (dx, dy) = screenToDoc(event.x, event.y)
+                        val point = dx.toInt() to dy.toInt()
+                        val lastPoint = _lassoPoints.lastOrNull()
+                        if (lastPoint != point) {
+                            _lassoPoints.add(point)
+                        }
+                        PaintDebug.d(PaintDebug.Input) { "[Lasso] continue stroke, points=${_lassoPoints.size}" }
+                    }
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val (dx, dy) = screenToDoc(event.x, event.y)
-                    val point = dx.toInt() to dy.toInt()
-                    // 前回のポイントと距離が十分あれば追加（スムージング）
-                    val lastPoint = _lassoPoints.lastOrNull()
-                    if (lastPoint == null || kotlin.math.hypot(
-                        (dx - lastPoint.first).toFloat(),
-                        (dy - lastPoint.second).toFloat()
-                    ) >= 4f) {
-                        _lassoPoints.add(point)
+                    if (_lassoPoints.isNotEmpty()) {
+                        val (dx, dy) = screenToDoc(event.x, event.y)
+                        val point = dx.toInt() to dy.toInt()
+                        // 前回のポイントと距離が十分あれば追加（スムージング: 8px で緩和）
+                        val lastPoint = _lassoPoints.lastOrNull()
+                        if (lastPoint != null && kotlin.math.hypot(
+                            (dx - lastPoint.first).toFloat(),
+                            (dy - lastPoint.second).toFloat()
+                        ) >= 8f) {
+                            _lassoPoints.add(point)
+                        }
                     }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (event.actionMasked == MotionEvent.ACTION_UP && _lassoPoints.size >= 3) {
+                MotionEvent.ACTION_UP -> {
+                    // 指を上げたら：最小3点以上なら選択確定
+                    if (_lassoPoints.size >= 3) {
                         selectLasso(_lassoPoints)
+                        _lassoPoints.clear()
+                        PaintDebug.d(PaintDebug.Input) { "[Lasso] selection finalized" }
+                    } else if (_lassoPoints.size > 0) {
+                        // 3点未満なら続行を促す（クリアしない）
+                        PaintDebug.d(PaintDebug.Input) { "[Lasso] needs more points (current=${_lassoPoints.size})" }
                     }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    // キャンセル時のみクリア
                     _lassoPoints.clear()
+                    PaintDebug.d(PaintDebug.Input) { "[Lasso] cancelled" }
                 }
             }
             return true
@@ -1561,6 +1585,42 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         pushSelMaskToRenderer()
     }
 
+    // ── 選択範囲操作 ──────────────────────────────────────────────
+
+    fun deleteSelection() {
+        val doc = _document ?: return
+        doc.deleteSelection(doc.activeLayerId)
+        updateUndoState()
+    }
+
+    fun fillSelection(color: Int) {
+        val doc = _document ?: return
+        doc.fillSelection(doc.activeLayerId, color)
+        updateUndoState()
+    }
+
+    fun copySelection() {
+        val doc = _document ?: return
+        doc.copySelection(doc.activeLayerId)
+        updateUndoState()
+        updateLayerState()
+    }
+
+    fun cutSelection() {
+        val doc = _document ?: return
+        doc.cutSelection(doc.activeLayerId)
+        updateUndoState()
+        updateLayerState()
+    }
+
+    fun moveSelection(dx: Int, dy: Int) {
+        val doc = _document ?: return
+        doc.moveSelection(doc.activeLayerId, dx, dy)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+        updateUndoState()
+    }
+
     // ── 変形ツール ──────────────────────────────────────────────
 
     fun transformActiveLayer(scaleX: Float, scaleY: Float, angleDeg: Float, tx: Float, ty: Float) {
@@ -1573,6 +1633,28 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun flipActiveLayerH() { _document?.flipLayerH(_document?.activeLayerId ?: return); updateUndoState() }
     fun flipActiveLayerV() { _document?.flipLayerV(_document?.activeLayerId ?: return); updateUndoState() }
     fun rotateActiveLayer90CW() { _document?.rotateLayer90CW(_document?.activeLayerId ?: return); updateUndoState() }
+
+    fun distortActiveLayer(corners: FloatArray) {
+        val doc = _document ?: return
+        doc.distortLayer(doc.activeLayerId, corners)
+        updateUndoState()
+    }
+
+    fun meshWarpActiveLayer(gridW: Int, gridH: Int, nodes: FloatArray) {
+        val doc = _document ?: return
+        doc.meshWarpLayer(doc.activeLayerId, gridW, gridH, nodes)
+        updateUndoState()
+    }
+
+    fun beginLiquify() { _document?.beginLiquify(_document?.activeLayerId ?: return) }
+
+    fun liquifyActiveLayer(cx: Float, cy: Float, radius: Float,
+                           dirX: Float, dirY: Float, pressure: Float, mode: Int) {
+        val doc = _document ?: return
+        doc.liquifyLayer(doc.activeLayerId, cx, cy, radius, dirX, dirY, pressure, mode)
+    }
+
+    fun endLiquify() { updateUndoState() }
 
     // ── レイヤーマスク ──────────────────────────────────────────
 

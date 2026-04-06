@@ -122,9 +122,9 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
               const SizedBox(width: 8),
               Expanded(
                 child: Slider(
-                  value: _brushSize.toDouble(),
+                  value: _brushSize.toDouble().clamp(1, 512),
                   min: 1,
-                  max: 200,
+                  max: 512,
                   onChanged: (val) {
                     setState(() => _brushSize = val.toInt());
                   },
