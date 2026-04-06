@@ -253,6 +253,32 @@ class PaintChannel {
   Future<void> cutSelection() => _method.invokeMethod('cutSelection');
   Future<void> moveSelection(int dx, int dy) => _method.invokeMethod('moveSelection', {'dx': dx, 'dy': dy});
 
+  // ─── ピクセルコピー変形（Word/Excel風）───────────────────
+
+  /// 選択範囲のピクセルをコピーし、バウンディングボックスを返す
+  /// @return {left, top, right, bottom} の境界情報
+  Future<Map<String, dynamic>> startPixelCopy() async {
+    final result = await _method.invokeMethod<Map>('startPixelCopy');
+    return Map<String, dynamic>.from(result ?? {});
+  }
+
+  /// ピクセルコピー変形を確定
+  /// @param x, y: 左上位置
+  /// @param scaleX, scaleY: スケール倍率
+  /// @param rotation: 回転角度（度数法）
+  Future<void> applyPixelCopy({
+    required int x,
+    required int y,
+    double scaleX = 1.0,
+    double scaleY = 1.0,
+    double rotation = 0.0,
+  }) => _method.invokeMethod('applyPixelCopy', {
+    'x': x, 'y': y, 'scaleX': scaleX, 'scaleY': scaleY, 'rotation': rotation,
+  });
+
+  /// ピクセルコピー変形をキャンセル
+  Future<void> cancelPixelCopy() => _method.invokeMethod('cancelPixelCopy');
+
   // ─── 変形ツール ───────────────────────────────────────
 
   Future<void> flipLayerH() => _method.invokeMethod('flipLayerH');

@@ -519,6 +519,25 @@ class PaintMethodChannelHandler(
                 }
             }
 
+            // ── ピクセルコピー変形 ──
+            "startPixelCopy" -> {
+                val bounds = viewModel.startPixelCopy()
+                result.success(bounds)
+            }
+            "applyPixelCopy" -> {
+                val x = call.argument<Int>("x") ?: 0
+                val y = call.argument<Int>("y") ?: 0
+                val scaleX = call.argument<Double>("scaleX")?.toFloat() ?: 1f
+                val scaleY = call.argument<Double>("scaleY")?.toFloat() ?: 1f
+                val rotation = call.argument<Double>("rotation")?.toFloat() ?: 0f
+                viewModel.applyPixelCopy(x, y, scaleX, scaleY, rotation)
+                result.success(null)
+            }
+            "cancelPixelCopy" -> {
+                viewModel.cancelPixelCopy()
+                result.success(null)
+            }
+
             // ── 状態取得（一括） ──
             "getState" -> result.success(buildStateMap())
 

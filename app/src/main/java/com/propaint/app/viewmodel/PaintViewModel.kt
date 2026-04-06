@@ -53,6 +53,7 @@ enum class ToolMode {
     SelectRect, SelectEllipse, SelectLasso, SelectMagicWand,
     SelectPen, SelectEraser,
     Transform,
+    PixelCopy,
     ShapeLine, ShapeRect, ShapeEllipse,
     FloodFill, Gradient,
     Text,
@@ -1830,5 +1831,29 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val doc = _document ?: return
         doc.applyGradientMap(doc.activeLayerId, gradientLut)
         hasUnsavedChanges = true; updateUndoState()
+    }
+
+    // ─── ピクセルコピー変形（Word/Excel風） ────────────────────
+
+    fun startPixelCopy(): Map<String, Int> {
+        val doc = _document ?: return emptyMap()
+        val bounds = doc.startPixelCopy(doc.activeLayerId)
+        return mapOf(
+            "left" to bounds.left,
+            "top" to bounds.top,
+            "right" to bounds.right,
+            "bottom" to bounds.bottom,
+        )
+    }
+
+    fun applyPixelCopy(x: Int, y: Int, scaleX: Float, scaleY: Float, rotation: Float) {
+        val doc = _document ?: return
+        doc.applyPixelCopy(doc.activeLayerId, x, y, scaleX, scaleY, rotation)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun cancelPixelCopy() {
+        val doc = _document ?: return
+        doc.cancelPixelCopy()
     }
 }

@@ -26,6 +26,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   late double _pressure = 1.0;
   bool _isAdding = true; // true: 選択ペン (追加), false: 選択消し (削除)
   bool _pressureEnabled = false; // 筆圧適用オンオフ
+  String _activeMode = 'add'; // 選択モード: add, subtract, rect, clear, copy
 
   @override
   void initState() {
@@ -41,6 +42,67 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
     if (oldWidget.state.brushSize != widget.state.brushSize) {
       _brushSize = widget.state.brushSize.toInt();
     }
+  }
+
+  /// モードボタンを構築
+  Widget _buildModeButton({
+    required String mode,
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    final isActive = _activeMode == mode;
+    return Tooltip(
+      message: label,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: isActive ? C.accent.withAlpha(200) : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: isActive ? C.accent : C.border.withAlpha(100),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 16, color: isActive ? Colors.white : C.iconDefault),
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isActive ? Colors.white : C.textSecondary,
+                    fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// ピクセルコピー変形を開始
+  void _startPixelCopy() {
+    // TODO: PixelCopyOverlay を表示するロジック
+    // 選択範囲がなければスナックバー表示
+    if (!widget.state.hasSelection) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('選択範囲がありません')),
+      );
+      return;
+    }
+
+    // startPixelCopy を呼び出す
+    widget.channel.startPixelCopy();
   }
 
   /// キャンバス中央でテスト用の選択ペイント
@@ -97,24 +159,78 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
           ),
           const SizedBox(height: 12),
 
-          // ──────────────────── モード切替 ────────────────────
-          Row(
-            children: [
-              Expanded(
-                child: SegmentedButton<bool>(
-                  segments: const [
-                    ButtonSegment(label: Text('追加'), value: true),
-                    ButtonSegment(label: Text('削除'), value: false),
-                  ],
-                  selected: {_isAdding},
-                  onSelectionChanged: (val) {
-                    setState(() => _isAdding = val.first);
-                    // ツールモードを切り替え
-                    widget.channel.setToolMode(_isAdding ? 'SelectPen' : 'SelectEraser');
+          // ──────────────────── アイコン列 ────────────────────
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Add mode
+                _buildModeButton(
+                  mode: 'add',
+                  icon: Icons.add_circle_outline,
+                  label: 'Add',
+                  onPressed: () {
+                    setState(() {
+                      _activeMode = 'add';
+                      _isAdding = true;
+                    });
+                    widget.channel.setToolMode('SelectPen');
                   },
                 ),
-              ),
-            ],
+                const SizedBox(width: 4),
+
+                // Subtract mode
+                _buildModeButton(
+                  mode: 'subtract',
+                  icon: Icons.remove_circle_outline,
+                  label: 'Sub',
+                  onPressed: () {
+                    setState(() {
+                      _activeMode = 'subtract';
+                      _isAdding = false;
+                    });
+                    widget.channel.setToolMode('SelectEraser');
+                  },
+                ),
+                const SizedBox(width: 4),
+
+                // Rectangle selection
+                _buildModeButton(
+                  mode: 'rect',
+                  icon: Icons.crop_square,
+                  label: 'Rect',
+                  onPressed: () {
+                    setState(() => _activeMode = 'rect');
+                    widget.channel.setToolMode('SelectRect');
+                  },
+                ),
+                const SizedBox(width: 4),
+
+                // Clear selection
+                _buildModeButton(
+                  mode: 'clear',
+                  icon: Icons.clear,
+                  label: 'Clear',
+                  onPressed: () {
+                    setState(() => _activeMode = 'clear');
+                    widget.channel.clearSelection();
+                  },
+                ),
+                const SizedBox(width: 4),
+
+                // Copy & Transform
+                _buildModeButton(
+                  mode: 'copy',
+                  icon: Icons.content_copy,
+                  label: 'Copy',
+                  onPressed: () {
+                    setState(() => _activeMode = 'copy');
+                    _startPixelCopy();
+                  },
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 12),
 

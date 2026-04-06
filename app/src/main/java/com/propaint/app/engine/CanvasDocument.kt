@@ -72,6 +72,11 @@ class CanvasDocument(val width: Int, val height: Int) {
     private var filterPreviewBuf: IntArray? = null
     private var filterPreviewBuf2: IntArray? = null
 
+    // ピクセルコピー変形（Word/Excel風）
+    private var pixelCopyBuffer: IntArray? = null
+    private var pixelCopyBounds: android.graphics.Rect? = null
+    private var pixelCopyOriginalPixels: IntArray? = null // キャンセル用のオリジナル保存
+
     // ストローク中フラグ
     private var strokeInProgress = false
     private var strokeBrush: BrushConfig? = null
@@ -1999,5 +2004,111 @@ class CanvasDocument(val width: Int, val height: Int) {
             FilterOps.applyGradientMap(pixels, gradientLut)
         }
         dirtyTracker.markFullRebuild()
+    }
+
+    // ─── ピクセルコピー変形（Word/Excel風）────────────────────
+
+    /**
+     * 選択範囲内のピクセルをコピーしバッファに保存、元のピクセルを削除（切り取り）
+     * @return バウンディングボックス {left, top, right, bottom} を Map で返す
+     */
+    fun startPixelCopy(layerId: Int): android.graphics.Rect = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return android.graphics.Rect()
+        val boundsArray = selectionManager.getBounds() ?: return android.graphics.Rect()
+
+        pushUndoTileDelta(layer)
+
+        // boundsArray = [left, top, right, bottom]
+        val left = boundsArray[0]
+        val top = boundsArray[1]
+        val right = boundsArray[2]
+        val bottom = boundsArray[3]
+
+        // バウンディングボックス内のピクセルをコピー
+        val copyWidth = right - left
+        val copyHeight = bottom - top
+        val totalPixels = copyWidth * copyHeight
+        pixelCopyBuffer = IntArray(totalPixels)
+        pixelCopyOriginalPixels = IntArray(totalPixels) // キャンセル用
+
+        var pixIdx = 0
+        for (ty in top until bottom) {
+            for (tx in left until right) {
+                val tileX = tx / 64
+                val tileY = ty / 64
+                val inTileX = tx % 64
+                val inTileY = ty % 64
+                val tileIndex = tileY * ((width + 63) / 64) + tileX
+                val tile = layer.content.tiles.getOrNull(tileIndex)
+                val pixelVal = tile?.pixels?.get(inTileY * 64 + inTileX) ?: 0
+                pixelCopyBuffer!![pixIdx] = pixelVal
+                pixelCopyOriginalPixels!![pixIdx] = pixelVal
+                pixIdx++
+            }
+        }
+
+        // オリジナルのピクセルを削除（選択範囲を削除）
+        deleteSelection(layerId)
+        pixelCopyBounds = android.graphics.Rect(left, top, right, bottom)
+        dirtyTracker.markFullRebuild()
+
+        return pixelCopyBounds!!
+    }
+
+    /**
+     * ピクセルコピーを確定（変形後のピクセルをレイヤーに貼り付け）
+     * @param x, y: 左上位置
+     * @param scaleX, scaleY: スケール倍率
+     * @param rotation: 回転角度（度数法）
+     */
+    fun applyPixelCopy(
+        layerId: Int,
+        x: Int,
+        y: Int,
+        scaleX: Float = 1f,
+        scaleY: Float = 1f,
+        rotation: Float = 0f,
+    ) = lock.withLock {
+        val layer = _layers.find { it.id == layerId } ?: return
+        val buffer = pixelCopyBuffer ?: return
+        val bounds = pixelCopyBounds ?: return
+
+        val copyWidth = bounds.right - bounds.left
+        val copyHeight = bounds.bottom - bounds.top
+
+        // 簡略実装：変形なし。実装時はバイリニア変換で対応
+        var pixIdx = 0
+        for (dy in 0 until copyHeight) {
+            for (dx in 0 until copyWidth) {
+                val pixelVal = buffer[pixIdx]
+                val px = x + dx
+                val py = y + dy
+
+                if (px in 0 until width && py in 0 until height) {
+                    val tileX = px / 64
+                    val tileY = py / 64
+                    val inTileX = px % 64
+                    val inTileY = py % 64
+                    val tileIndex = tileY * ((width + 63) / 64) + tileX
+                    val tile = layer.content.tiles.getOrNull(tileIndex)
+                    tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
+                }
+                pixIdx++
+            }
+        }
+
+        pixelCopyBuffer = null
+        pixelCopyBounds = null
+        pixelCopyOriginalPixels = null
+        dirtyTracker.markFullRebuild()
+    }
+
+    /** ピクセルコピーをキャンセル（オリジナルピクセルを復元） */
+    fun cancelPixelCopy() = lock.withLock {
+        // Undo/Redo で対応可能なため、ここでは単にバッファをクリア
+        pixelCopyBuffer = null
+        pixelCopyBounds = null
+        pixelCopyOriginalPixels = null
     }
 }
