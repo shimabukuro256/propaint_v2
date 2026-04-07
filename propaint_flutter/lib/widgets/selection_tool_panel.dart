@@ -379,13 +379,19 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
             const SizedBox(height: 12),
           ],
 
-          // ──────── マグネット選択モード用：キャンセルボタンのみ ────────
+          // ──────── マグネット選択モード用：Complete/キャンセルボタン ────────
           if (isMagnetMode) ...[
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  _buildActionButton(
+                    icon: Icons.check_circle,
+                    label: 'Complete',
+                    onPressed: () => widget.channel.finalizeMagnetSelection(),
+                  ),
+                  const SizedBox(width: 4),
                   _buildActionButton(
                     icon: Icons.close,
                     label: 'キャンセル',

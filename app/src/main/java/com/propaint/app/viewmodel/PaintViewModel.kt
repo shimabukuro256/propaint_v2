@@ -1188,6 +1188,34 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         PaintDebug.d(PaintDebug.Input) { "[Magnet] selection cancelled via button" }
     }
 
+    /** マグネット選択を確定（Complete ボタン押下時） */
+    fun finalizeMagnetSelection() {
+        if (_magnetStart == null || _magnetPoints.size < 2) {
+            PaintDebug.d(PaintDebug.Input) { "[Magnet] finalize failed: need >= 2 anchors, have ${_magnetPoints.size}" }
+            return
+        }
+
+        val start = _magnetStart!!
+        val lastPoint = _magnetPoints.lastOrNull()
+        if (lastPoint != null && lastPoint != start) {
+            // 最後のアンカーから開始点へのパスをトレース
+            val doc = _document ?: return
+            val activeLayer = doc.getActiveLayer()
+            val surface = activeLayer?.content
+            if (surface != null) {
+                _magnetPath.addAll(traceMagnetPath(surface, lastPoint.first, lastPoint.second, start.first, start.second))
+            }
+        }
+        _magnetPath.add(start)  // 開始点を追加して閉じる
+
+        // 選択を確定
+        selectLasso(_magnetPath.toList())
+        _magnetStart = null
+        _magnetPoints.clear()
+        _magnetPath.clear()
+        PaintDebug.d(PaintDebug.Input) { "[Magnet] selection finalized via Complete button" }
+    }
+
     /** 選択ペン/消しペン: ブラシサイズの円で選択マスクをペイント */
     private fun paintSelectionMask(event: MotionEvent, doc: CanvasDocument, isAdd: Boolean) {
         val radius = max(1f, _brushSize.value / 2f)

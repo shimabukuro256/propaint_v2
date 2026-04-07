@@ -287,6 +287,9 @@ class PaintChannel {
   /// マグネット選択をキャンセル
   Future<void> cancelMagnetSelection() => _method.invokeMethod('cancelMagnetSelection');
 
+  /// マグネット選択を確定（確定ボタン押下時）
+  Future<void> finalizeMagnetSelection() => _method.invokeMethod('finalizeMagnetSelection');
+
   // ─── ピクセルコピー変形（Word/Excel風）───────────────────
 
   /// 選択範囲のピクセルをコピーし、バウンディングボックスを返す

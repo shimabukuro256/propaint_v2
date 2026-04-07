@@ -454,6 +454,9 @@ class PaintMethodChannelHandler(
             "cancelMagnetSelection" -> {
                 viewModel.cancelMagnetSelection(); result.success(null)
             }
+            "finalizeMagnetSelection" -> {
+                viewModel.finalizeMagnetSelection(); result.success(null)
+            }
 
             // ── 変形 ──
             "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }
