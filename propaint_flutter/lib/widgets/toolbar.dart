@@ -126,37 +126,13 @@ class PaintToolbar extends StatelessWidget {
 
           _separator(),
 
-          // 選択ペン
+          // 選択ツール（ペン・なげなわ・自動選択を統合）
           _ToolbarIcon(
             icon: Icons.edit_rounded,
-            onPressed: () {
-              channel.setToolMode('SelectPen');
-              onTogglePanel(PanelType.selectionTool);
-            },
-            isActive: state.toolMode == 'SelectPen' || openPanel == PanelType.selectionTool,
-            tooltip: '選択ペン',
-          ),
-
-          // なげなわ選択
-          _ToolbarIcon(
-            icon: Icons.gesture_rounded,
-            onPressed: () {
-              channel.setToolMode('SelectLasso');
-              onTogglePanel(PanelType.selection);
-            },
-            isActive: state.toolMode == 'SelectLasso',
-            tooltip: 'なげなわ選択',
-          ),
-
-          // 自動選択
-          _ToolbarIcon(
-            icon: Icons.auto_fix_high_rounded,
-            onPressed: () {
-              channel.setToolMode('SelectMagicWand');
-              onTogglePanel(PanelType.selection);
-            },
-            isActive: state.toolMode == 'SelectMagicWand',
-            tooltip: '自動選択',
+            onPressed: () => onTogglePanel(PanelType.selectionTool),
+            isActive: ['SelectPen', 'SelectLasso', 'SelectMagicWand'].contains(state.toolMode) ||
+                      openPanel == PanelType.selectionTool,
+            tooltip: '選択',
           ),
 
           // 図形・テキスト
