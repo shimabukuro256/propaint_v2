@@ -1291,3 +1291,400 @@ class _LayerPanelState extends State<LayerPanel> {
 - [ ] EventChannel で複数選択状態の同期
 - [ ] 空白タップで選択解除（ジェスチャーハンドラ追加）
 - [ ] キーボード検出（Shift/Ctrl+タップ）対応（将来）
+
+---
+
+## 選択範囲機能の安定性改善プラン
+
+選択範囲作成後の **変形・移動・混色時の不安定性** を根本的に修正するプラン。
+
+### 既知の問題と根本原因
+
+#### **問題1: 変形時の部分選択ピクセルが正規強度で処理される**
+**ファイル**: `TransformManager.kt:58-61`
+```kotlin
+// 現状：maskVal == 0 でスキップするだけ
+if (selectionMask != null) {
+    val maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
+    if (maskVal == 0) continue  // スキップ
+    // maskVal が 1..254 の場合、アルファ減衰がない ← 問題！
+}
+```
+
+**結果**: 楕円選択・なげなわ選択など **境界付近の半透明ピクセルが全強度で変形される**
+- エッジがぎざぎざになる
+- スケール時に不自然な濃淡が出現
+
+#### **問題2: 混色ブラシの選択範囲処理が不完全**
+**ファイル**: `BrushEngine.kt` (混色処理の箇所)
+```
+- プレビューで範囲外のストロークが見える
+- 混色時に選択範囲境界付近で不透明度が極端に低くなる
+```
+
+**原因**: `blurAreaOnSurface()` などブラシ効果適用時に、部分選択（maskVal < 255）のアルファが適切に処理されていない
+
+#### **問題3: レイヤー外はみ出し時のクリップ処理がない**
+**ファイル**: `TransformManager.kt:79-80`
+```kotlin
+val tx = dstX / Tile.SIZE; val ty = dstY / Tile.SIZE
+if (tx < 0 || tx >= surface.tilesX || ty < 0 || ty >= surface.tilesY) continue
+```
+
+**現状**: キャンバス外にはみ出したピクセルは単に破棄（OK）
+**問題**: ただし、部分選択で境界が複雑な場合、予期しないクリッピングが生じる可能性
+
+#### **問題4: 複数選択レイヤーの変形・移動がリアルタイム処理で負荷超過**
+**現象**: 複数選択したレイヤーをドラッグ移動・変形すると応答性が低下し、クラッシュリスク
+
+**原因**: 各レイヤーに対して毎フレーム変形計算を実行 → 複数レイヤー × 複数フレーム → 計算量爆発
+
+### 修正計画
+
+#### **Phase A: 変形・ブラシ時の部分選択アルファ処理（優先度：高）**
+
+**A-1. TransformManager.freeTransform() の修正**
+```kotlin
+// 60行目付近を修正
+if (selectionMask != null) {
+    val maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
+    if (maskVal == 0) continue
+    
+    // ★新規追加：部分選択のアルファ減衰
+    var pixel = sampleBilinear(src, w, h, srcXf, srcYf)
+    if (pixel == 0) continue
+    
+    if (maskVal < 255) {
+        // グレースケール値（0..255）を正規化（0..1）に
+        val alphaMask = maskVal / 255f
+        val a = PixelOps.alpha(pixel)
+        val r = PixelOps.red(pixel)
+        val g = PixelOps.green(pixel)
+        val b = PixelOps.blue(pixel)
+        
+        // アルファをマスク値で減衰
+        pixel = PixelOps.pack(
+            (a * alphaMask).toInt(),  // アルファを factor で減衰
+            r, g, b
+        )
+    }
+} else {
+    var pixel = sampleBilinear(src, w, h, srcXf, srcYf)
+    if (pixel == 0) continue
+}
+
+// 後続の処理は変わらず
+val tx = dstX / Tile.SIZE
+...
+tile.pixels[ly * Tile.SIZE + lx] = pixel
+```
+
+**実装詳細**:
+- maskVal: 0 = 完全未選択、255 = 完全選択、1..254 = 半透明選択
+- alphaMask = maskVal / 255f で 0..1 に正規化
+- ピクセルアルファを `a * alphaMask` で減衰
+- premultiplied ARGB なので、RGB チャンネルは**そのまま**（α値の乗算のみ）
+
+**対象メソッド**:
+- `freeTransform()` （メイン変形）
+- `flipHorizontal()` / `flipVertical()` （反転）
+- `rotateClockwise()` / `rotateCounterClockwise()` （90度回転）
+- `scaleCanvas()` （キャンバス拡大縮小）
+
+**見積もり**: 1.5時間
+
+---
+
+**A-2. BrushEngine の混色・ぼかし時の選択範囲対応**
+
+**ファイル**: `BrushEngine.kt` (複数箇所)
+
+```kotlin
+// 例：blurAreaOnSurface() 関数内
+
+fun blurAreaOnSurface(
+    px: Int, py: Int, radius: Int,
+    selectionMask: ByteArray? = null
+) {
+    for (y in (py - radius)..(py + radius)) {
+        for (x in (px - radius)..(px + radius)) {
+            if (x < 0 || x >= width || y < 0 || y >= height) continue
+            
+            // ★ 選択範囲チェック
+            if (selectionMask != null) {
+                val maskVal = selectionMask[y * width + x].toInt() and 0xFF
+                if (maskVal == 0) continue  // 選択範囲外 → スキップ
+                
+                // ★新規：部分選択時のアルファ減衰
+                if (maskVal < 255) {
+                    val alphaMask = maskVal / 255f
+                    // ぼかし・混色処理後に alphaMask を乗算
+                    val blurred = sampleBlur(...)
+                    val a = PixelOps.alpha(blurred)
+                    result = PixelOps.pack(
+                        (a * alphaMask).toInt(),
+                        PixelOps.red(blurred),
+                        PixelOps.green(blurred),
+                        PixelOps.blue(blurred)
+                    )
+                }
+            }
+        }
+    }
+}
+```
+
+**対象メソッド**:
+- `blurAreaOnSurface()` — ブラシぼかし
+- `mixColorOnSurface()` — 混色（グラデーション・色混ぜ）
+- すべてのプレビュー描画メソッド
+
+**制約**:
+- プレビューも同じロジックで選択範囲を反映（プレビュー範囲外のストロークが見えない）
+
+**見積もり**: 2時間
+
+---
+
+#### **Phase B: 複数選択レイヤーの変形・移動をプレビュー → 確定に変更（優先度：高）**
+
+**B-1. 変形・移動操作の遅延処理化**
+
+**現状**: 
+```
+MoveTool / TransformTool で即座に全レイヤーを変形 → リアルタイムプレビュー
+→ 複数レイヤー × 複数フレーム → 計算量爆発 → クラッシュ
+```
+
+**改善案**:
+```
+1. ユーザーが変形・移動ハンドルをドラッグ開始
+2. プレビュー画像のみを GPU で変形（リアルタイム）
+   → プレビュー: TransformPreview (OpenGL shaderで実装)
+   → 軽量（GPU計算、CPU 側は計算なし）
+3. ユーザーが確定（Enter / タップ確定）
+4. 一括処理で全レイヤーに最終変形を適用
+   → applyMultiLayerTransform(layerIds, op, selectionMask)
+   → CPU intensive だが1回のみ
+```
+
+**実装内容**:
+
+**Kotlin側:**
+```kotlin
+// TransformManager に新規メソッド追加
+
+fun applyPreviewTransform(
+    displayLayerIds: List<Int>,  // 複数選択レイヤー or 単一レイヤー
+    centerX: Float, centerY: Float,
+    scaleX: Float, scaleY: Float,
+    angleDeg: Float,
+    translateX: Float, translateY: Float,
+    selectionMask: ByteArray? = null
+): Boolean {
+    // Undo スナップショット取得
+    val snapshots = displayLayerIds.associate { id ->
+        val layer = document.getLayerById(id) ?: return false
+        id to layer.takeSnapshot()
+    }
+    
+    try {
+        // 全レイヤーに統一変形を適用
+        for (layerId in displayLayerIds) {
+            val layer = document.getLayerById(layerId) ?: continue
+            
+            // 選択範囲×複数レイヤー対応（Phase 3）
+            TransformManager.freeTransform(
+                surface = layer.surface,
+                centerX, centerY,
+                scaleX, scaleY,
+                angleDeg,
+                translateX, translateY,
+                selectionMask = selectionMask  // ← ここで選択範囲クリップ
+            )
+        }
+        
+        // 全レイヤーをダーティマーク
+        displayLayerIds.forEach {
+            document.getLayerById(it)?.surface?.markAllTilesDirty()
+        }
+        
+        // Undo スタック
+        pushUndoSnapshot(UndoSnapshot.MultiLayerTransform(
+            layerIds = displayLayerIds,
+            before = snapshots,
+            op = MultiLayerTransformOp.Composite(...)
+        ))
+        
+        return true
+    } catch (e: Exception) {
+        // ロールバック
+        snapshots.forEach { (id, snapshot) ->
+            document.getLayerById(id)?.restoreSnapshot(snapshot)
+        }
+        return false
+    }
+}
+```
+
+**Flutter側:**
+```dart
+// transform_panel.dart に追加
+
+class TransformPreviewState {
+  double scaleX = 1.0;
+  double scaleY = 1.0;
+  double angle = 0.0;  // 度数法
+  double translateX = 0.0;
+  double translateY = 0.0;
+  
+  bool isPreviewMode = true;  // true = プレビュー表示、false = 確定処理中
+}
+
+void onTransformConfirm() {
+  setState(() => isPreviewMode = false);  // UI をロック
+  
+  channel.invokeMethod('applyPreviewTransform', {
+    'layerIds': _selectedLayerIds.toList(),  // 複数選択対応
+    'centerX': _previewState.centerX,
+    'centerY': _previewState.centerY,
+    'scaleX': _previewState.scaleX,
+    'scaleY': _previewState.scaleY,
+    'angleDeg': _previewState.angle,
+    'translateX': _previewState.translateX,
+    'translateY': _previewState.translateY,
+    'selectionMask': _encodeSelectionMask(paintState.selectionMask),  // null ならnull
+  }).then((_) {
+    setState(() => isPreviewMode = true);
+    _clearPreview();
+  }).catchError((e) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('変形に失敗しました: $e'))
+    );
+    setState(() => isPreviewMode = true);
+  });
+}
+```
+
+**見積もり**: 3時間（Kotlin 1.5時間 + Flutter 1.5時間）
+
+---
+
+#### **Phase C: 選択範囲のクリップ処理の強化（優先度：中）**
+
+**C-1. バウンディングボックス計算の最適化**
+
+```kotlin
+// SelectionManager.kt に追加
+
+data class SelectionBounds(
+    val minX: Int, val minY: Int,
+    val maxX: Int, val maxY: Int  // inclusive
+)
+
+fun getBoundsStrict(): SelectionBounds? {
+    if (!hasSelection) return null
+    if (_boundsCacheDirty) {
+        // キャッシュを再計算
+        var minX = Int.MAX_VALUE; var minY = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE; var maxY = Int.MIN_VALUE
+        
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                if ((_mask!![y * width + x].toInt() and 0xFF) > 0) {
+                    minX = minOf(minX, x)
+                    minY = minOf(minY, y)
+                    maxX = maxOf(maxX, x)
+                    maxY = maxOf(maxY, y)
+                }
+            }
+        }
+        
+        _cachedBounds = intArrayOf(minX, minY, maxX, maxY)
+        _boundsCacheDirty = false
+    }
+    return SelectionBounds(
+        _cachedBounds[0], _cachedBounds[1],
+        _cachedBounds[2], _cachedBounds[3]
+    )
+}
+```
+
+**用途**: 変形・移動時に選択範囲の有効領域だけを処理 → メモリ・CPU効率化
+
+**見積もり**: 1時間
+
+---
+
+#### **Phase D: 選択範囲がない場合のフォールバック（矩形選択自動作成）**
+
+**ユースケース**: 「選択範囲がないときは描画済みピクセルを矩形選択してから編集」
+
+**実装**:
+```kotlin
+// TransformManager の引数に追加
+
+fun freeTransformWithAutoSelect(
+    surface: TiledSurface,
+    centerX: Float, centerY: Float,
+    scaleX: Float, scaleY: Float,
+    angleDeg: Float,
+    translateX: Float, translateY: Float,
+    selectionMask: ByteArray? = null,
+    autoSelectIfEmpty: Boolean = false  // ← 新規
+) {
+    val maskToUse = if (selectionMask == null && autoSelectIfEmpty) {
+        // 描画済みピクセルのバウンディングボックスを自動選択
+        val bounds = surface.getContentBounds()  // 非透明ピクセルの範囲
+        if (bounds == null) {
+            // コンテンツが空 → スキップ
+            return
+        }
+        // 矩形選択マスクを生成
+        SelectionManager.createRectangleSelection(
+            bounds.left, bounds.top, bounds.right, bounds.bottom,
+            width = surface.width, height = surface.height
+        )
+    } else {
+        selectionMask
+    }
+    
+    // 通常の変形処理
+    freeTransform(surface, centerX, centerY, scaleX, scaleY, angleDeg, translateX, translateY, maskToUse)
+}
+```
+
+**見積もり**: 1.5時間
+
+---
+
+### 実装優先順位
+
+#### **即実装（クリティカルバグ修正）:**
+
+1. **Phase A-1**: TransformManager の部分選択アルファ減衰 （1.5時間）
+2. **Phase A-2**: BrushEngine の混色・プレビュー修正 （2時間）
+3. **Phase C-1**: バウンディングボックス計算最適化 （1時間）
+
+**小計**: 4.5時間 → 実装可能か確認後、修正コード生成
+
+#### **次フェーズ（パフォーマンス改善）:**
+
+4. **Phase B-1**: 複数選択レイヤーのプレビュー → 確定変更 （3時間）
+
+#### **オプション（UX改善）:**
+
+5. **Phase D**: 選択範囲自動作成フォールバック （1.5時間）
+
+### チェックリスト
+
+- [ ] **Phase A-1**: TransformManager freeTransform() に maskVal < 255 処理追加
+- [ ] **Phase A-1**: flipHorizontal/Vertical, rotate*, scaleCanvas に同じ処理追加
+- [ ] **Phase A-2**: BrushEngine blurAreaOnSurface(), mixColorOnSurface() に選択範囲対応
+- [ ] **Phase A-2**: プレビュー描画メソッドすべてに選択範囲反映
+- [ ] **Phase C-1**: SelectionManager.getBoundsStrict() 実装
+- [ ] **Phase C-1**: 変形時のバウンディングボックスキャッシュ活用
+- [ ] ビルド確認: `./gradlew :app:compileDebugKotlin --no-daemon`
+- [ ] 実機テスト: 楕円選択 → 変形 → エッジが滑らか
+- [ ] 実機テスト: 混色ブラシ + 選択範囲 → プレビュー範囲外にストロークが見えない
+- [ ] パフォーマンステスト: 複数選択 × 変形でクラッシュしない

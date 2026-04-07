@@ -55,8 +55,9 @@ object TransformManager {
         for (dstY in 0 until h) {
             for (dstX in 0 until w) {
                 // 選択マスク有効時: 選択範囲内のピクセルのみ処理
+                var maskVal = 255  // デフォルト = 完全選択
                 if (selectionMask != null) {
-                    val maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
+                    maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
                     if (maskVal == 0) continue  // 選択範囲外 → スキップ
                 }
 
@@ -73,8 +74,16 @@ object TransformManager {
                 val srcXf = sx + centerX
                 val srcYf = sy + centerY
 
-                val pixel = sampleBilinear(src, w, h, srcXf, srcYf)
+                var pixel = sampleBilinear(src, w, h, srcXf, srcYf)
                 if (pixel == 0) continue
+
+                // 部分選択時: アルファを減衰
+                if (maskVal < 255) {
+                    val fadeAlpha = maskVal / 255f
+                    val origAlpha = PixelOps.alpha(pixel)
+                    val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                    pixel = PixelOps.pack(newAlpha, PixelOps.red(pixel), PixelOps.green(pixel), PixelOps.blue(pixel))
+                }
 
                 val tx = dstX / Tile.SIZE; val ty = dstY / Tile.SIZE
                 if (tx < 0 || tx >= surface.tilesX || ty < 0 || ty >= surface.tilesY) continue
@@ -209,9 +218,11 @@ object TransformManager {
 
         for (dstY in 0 until h) {
             for (dstX in 0 until w) {
+                // 選択マスク有効時: 部分選択ピクセルのアルファを減衰
+                var maskVal = 255  // デフォルト = 完全選択
                 if (selectionMask != null) {
-                    val maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
-                    if (maskVal == 0) continue
+                    maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
+                    if (maskVal == 0) continue  // 完全非選択: スキップ
                 }
                 // 逆変換: dst(x,y) → src(u,v) via 双線形逆マッピング
                 // 正規化座標 u,v を求め、元の矩形 [0,w)x[0,h) にマッピング
@@ -221,8 +232,17 @@ object TransformManager {
                     w.toFloat(), h.toFloat()
                 ) ?: continue
 
-                val pixel = sampleBilinear(src, w, h, srcXY.first, srcXY.second)
+                var pixel = sampleBilinear(src, w, h, srcXY.first, srcXY.second)
                 if (pixel == 0) continue
+
+                // 部分選択時: アルファを減衰
+                if (maskVal < 255) {
+                    val fadeAlpha = maskVal / 255f
+                    val origAlpha = PixelOps.alpha(pixel)
+                    val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                    pixel = PixelOps.pack(newAlpha, PixelOps.red(pixel), PixelOps.green(pixel), PixelOps.blue(pixel))
+                }
+
                 val tx = dstX / Tile.SIZE; val ty = dstY / Tile.SIZE
                 if (tx < 0 || tx >= surface.tilesX || ty < 0 || ty >= surface.tilesY) continue
                 val tile = surface.getOrCreateMutable(tx, ty)
@@ -297,9 +317,11 @@ object TransformManager {
 
         for (dstY in 0 until h) {
             for (dstX in 0 until w) {
+                // 選択マスク有効時: 部分選択ピクセルのアルファを減衰
+                var maskVal = 255  // デフォルト = 完全選択
                 if (selectionMask != null) {
-                    val maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
-                    if (maskVal == 0) continue
+                    maskVal = selectionMask[dstY * w + dstX].toInt() and 0xFF
+                    if (maskVal == 0) continue  // 完全非選択: スキップ
                 }
 
                 // dstX,dstY がどのメッシュセルに属するか
@@ -328,8 +350,17 @@ object TransformManager {
                 val srcX = cellX * cellW + lu * cellW
                 val srcY = cellY * cellH + lv * cellH
 
-                val pixel = sampleBilinear(src, w, h, srcX, srcY)
+                var pixel = sampleBilinear(src, w, h, srcX, srcY)
                 if (pixel == 0) continue
+
+                // 部分選択時: アルファを減衰
+                if (maskVal < 255) {
+                    val fadeAlpha = maskVal / 255f
+                    val origAlpha = PixelOps.alpha(pixel)
+                    val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                    pixel = PixelOps.pack(newAlpha, PixelOps.red(pixel), PixelOps.green(pixel), PixelOps.blue(pixel))
+                }
+
                 // 書き込み先は変形後座標
                 val dstPx = nx.toInt(); val dstPy = ny.toInt()
                 if (dstPx < 0 || dstPx >= w || dstPy < 0 || dstPy >= h) continue
@@ -370,9 +401,11 @@ object TransformManager {
                 val dist2 = dx * dx + dy * dy
                 if (dist2 >= r2) continue
 
+                // 選択マスク有効時: 部分選択ピクセルのアルファを減衰
+                var maskVal = 255  // デフォルト = 完全選択
                 if (selectionMask != null) {
-                    val maskVal = selectionMask[y * w + x].toInt() and 0xFF
-                    if (maskVal == 0) continue
+                    maskVal = selectionMask[y * w + x].toInt() and 0xFF
+                    if (maskVal == 0) continue  // 完全非選択: スキップ
                 }
 
                 // 距離に基づく減衰 (中心ほど強い)
@@ -391,7 +424,15 @@ object TransformManager {
 
                 // ソース座標 (変位の逆方向からサンプリング)
                 val srcXf = x - vx; val srcYf = y - vy
-                val pixel = sampleBilinear(src, w, h, srcXf, srcYf)
+                var pixel = sampleBilinear(src, w, h, srcXf, srcYf)
+
+                // 部分選択時: アルファを減衰
+                if (maskVal < 255) {
+                    val fadeAlpha = maskVal / 255f
+                    val origAlpha = PixelOps.alpha(pixel)
+                    val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                    pixel = PixelOps.pack(newAlpha, PixelOps.red(pixel), PixelOps.green(pixel), PixelOps.blue(pixel))
+                }
 
                 val tx = x / Tile.SIZE; val ty2 = y / Tile.SIZE
                 val tile = surface.getOrCreateMutable(tx, ty2)
