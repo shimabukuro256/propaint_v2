@@ -23,12 +23,17 @@ class SelectionManager(val width: Int, val height: Int) {
     /** 選択が存在するか */
     val hasSelection: Boolean get() = _mask != null
 
+    /** キャッシュされた選択範囲の境界 (minX, minY, maxX+1, maxY+1) */
+    private var _cachedBounds: IntArray? = null
+    private var _boundsCacheDirty = true
+
     /** 外部からマスクを直接設定（移動操作等） */
     fun setMask(newMask: ByteArray?) {
         if (newMask != null) {
             require(newMask.size == width * height) { "mask size mismatch: ${newMask.size} != ${width * height}" }
         }
         _mask = newMask
+        _boundsCacheDirty = true  // キャッシュを無効化
     }
 
     /** マスクの指定座標の値を取得 (0..255) */
@@ -76,6 +81,7 @@ class SelectionManager(val width: Int, val height: Int) {
     /** 選択解除 */
     fun clearSelection() {
         _mask = null
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] cleared" }
     }
 
@@ -84,6 +90,7 @@ class SelectionManager(val width: Int, val height: Int) {
         val m = ByteArray(width * height)
         m.fill(0xFF.toByte())
         _mask = m
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] selectAll" }
     }
 
@@ -104,6 +111,7 @@ class SelectionManager(val width: Int, val height: Int) {
             }
         }
         _mask = m
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] selectRect ($l,$t)-($r,$b) mode=$mode" }
     }
 
@@ -137,6 +145,7 @@ class SelectionManager(val width: Int, val height: Int) {
             }
         }
         _mask = m
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] selectEllipse cx=$cx cy=$cy rx=$rx ry=$ry" }
     }
 
@@ -188,6 +197,7 @@ class SelectionManager(val width: Int, val height: Int) {
             }
         }
         _mask = m
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] selectLasso points=${points.size}" }
     }
 
@@ -246,6 +256,7 @@ class SelectionManager(val width: Int, val height: Int) {
             }
         }
         _mask = m
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] selectByColor ($startX,$startY) tol=$tol contiguous=$contiguous" }
     }
 
@@ -262,12 +273,14 @@ class SelectionManager(val width: Int, val height: Int) {
         for (i in m.indices) {
             m[i] = (255 - (m[i].toInt() and 0xFF)).toByte()
         }
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] inverted" }
     }
 
     /**
      * 選択範囲を拡張/縮小。
      * @param amount 正=拡張, 負=縮小 (ピクセル数)
+     * 最適化: 2パス実装。水平→垂直で O(width*height*radius) に改善
      */
     fun expandContract(amount: Int) {
         val m = _mask ?: return
@@ -275,26 +288,38 @@ class SelectionManager(val width: Int, val height: Int) {
         val absAmt = abs(amount)
         val isExpand = amount > 0
 
-        val result = ByteArray(width * height)
+        // 1パス目: 水平処理
+        val temp = ByteArray(width * height)
         for (y in 0 until height) {
+            val off = y * width
             for (x in 0 until width) {
                 var best = if (isExpand) 0 else 255
-                // 正方形カーネルで近傍を検索
-                val y0 = max(0, y - absAmt); val y1 = min(height - 1, y + absAmt)
-                val x0 = max(0, x - absAmt); val x1 = min(width - 1, x + absAmt)
+                val x0 = max(0, x - absAmt)
+                val x1 = min(width - 1, x + absAmt)
+                for (nx in x0..x1) {
+                    val v = m[off + nx].toInt() and 0xFF
+                    best = if (isExpand) max(best, v) else min(best, v)
+                }
+                temp[off + x] = best.toByte()
+            }
+        }
+
+        // 2パス目: 垂直処理
+        val result = ByteArray(width * height)
+        for (x in 0 until width) {
+            for (y in 0 until height) {
+                var best = if (isExpand) 0 else 255
+                val y0 = max(0, y - absAmt)
+                val y1 = min(height - 1, y + absAmt)
                 for (ny in y0..y1) {
-                    for (nx in x0..x1) {
-                        // 円形距離チェック
-                        val dx = nx - x; val dy = ny - y
-                        if (dx * dx + dy * dy > absAmt * absAmt) continue
-                        val v = m[ny * width + nx].toInt() and 0xFF
-                        best = if (isExpand) max(best, v) else min(best, v)
-                    }
+                    val v = temp[ny * width + x].toInt() and 0xFF
+                    best = if (isExpand) max(best, v) else min(best, v)
                 }
                 result[y * width + x] = best.toByte()
             }
         }
         _mask = result
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] expandContract amount=$amount" }
     }
 
@@ -315,12 +340,16 @@ class SelectionManager(val width: Int, val height: Int) {
         for (i in m.indices) {
             m[i] = buf2[i].coerceIn(0, 255).toByte()
         }
+        _boundsCacheDirty = true
         PaintDebug.d(PaintDebug.Layer) { "[Selection] feather radius=$safeRadius" }
     }
 
-    /** 選択範囲のバウンディングボックスを取得。選択がない場合は null */
+    /** 選択範囲のバウンディングボックスを取得。選択がない場合は null (キャッシュ対応) */
     fun getBounds(): IntArray? {
         val m = _mask ?: return null
+        // キャッシュが有効なら返す
+        if (!_boundsCacheDirty) return _cachedBounds
+
         var minX = width; var minY = height; var maxX = 0; var maxY = 0
         for (y in 0 until height) {
             val off = y * width
@@ -331,8 +360,14 @@ class SelectionManager(val width: Int, val height: Int) {
                 }
             }
         }
-        if (minX > maxX) return null
-        return intArrayOf(minX, minY, maxX + 1, maxY + 1)
+        if (minX > maxX) {
+            _cachedBounds = null
+            _boundsCacheDirty = false
+            return null
+        }
+        _cachedBounds = intArrayOf(minX, minY, maxX + 1, maxY + 1)
+        _boundsCacheDirty = false
+        return _cachedBounds
     }
 
     // ── 内部ヘルパー ────────────────────────────────────────────

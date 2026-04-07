@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'models/paint_state.dart';
 import 'services/paint_channel.dart';
@@ -76,6 +77,9 @@ class _PaintScaffoldState extends State<PaintScaffold> {
     // ネイティブからのジェスチャ通知を受信（先に登録）
     _channel.onNativeGesture = _onNativeGesture;
 
+    // 物理キーボードショートカット登録
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+
     // プラットフォーム側の初期化を待つため、フレーム後に遅延実行
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -90,9 +94,81 @@ class _PaintScaffoldState extends State<PaintScaffold> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _stateSub?.cancel();
     _gestureOverlayTimer?.cancel();
     super.dispose();
+  }
+
+  // ── キーボードショートカット ────────────────────────────────
+
+  bool _handleKeyEvent(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    final key = event.logicalKey;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+
+    if (ctrl) {
+      if (key == LogicalKeyboardKey.keyZ) {
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          _channel.redo();
+        } else {
+          _channel.undo();
+        }
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyY) {
+        _channel.redo();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyC && _state.hasSelection) {
+        _channel.copySelection();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyX && _state.hasSelection) {
+        _channel.cutSelection();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyA) {
+        _channel.selectAll();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyD) {
+        _channel.clearSelection();
+        return true;
+      }
+    } else {
+      if (key == LogicalKeyboardKey.bracketLeft) {
+        final newSize = (_state.brushSize - 5).clamp(1.0, 512.0);
+        _channel.setBrushSize(newSize);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.bracketRight) {
+        final newSize = (_state.brushSize + 5).clamp(1.0, 512.0);
+        _channel.setBrushSize(newSize);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyB) {
+        _channel.setBrushType('Pencil');
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyE) {
+        _channel.setBrushType('Eraser');
+        return true;
+      }
+      if (key == LogicalKeyboardKey.keyS) {
+        _channel.setToolMode('SelectRect');
+        return true;
+      }
+      if (key == LogicalKeyboardKey.space) {
+        _channel.resetView();
+        return true;
+      }
+      if (key == LogicalKeyboardKey.delete && _state.hasSelection) {
+        _channel.deleteSelection();
+        return true;
+      }
+    }
+    return false;
   }
 
   void _onStateUpdate(Map<String, dynamic> m) {

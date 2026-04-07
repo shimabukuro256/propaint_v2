@@ -28,6 +28,21 @@ class Layer(
 
     /** テキストレイヤーの設定 (null = 通常レイヤー) */
     var textConfig: TextRenderer.TextConfig? = null
+
+    /** 表示順序（フォルダとレイヤーの統一的な層順管理用） */
+    var displayOrder: Int = 0
+
+    // ── トランスフォーム情報（ピクセル移動機能対応） ──
+    /** 一時的な移動オフセット X (ピクセル) - ピクセル移動中に使用 */
+    var offsetX: Float = 0f
+    /** 一時的な移動オフセット Y (ピクセル) - ピクセル移動中に使用 */
+    var offsetY: Float = 0f
+    /** スケール X (1.0 = 等倍) - メッシュ変形等に対応 */
+    var scaleX: Float = 1f
+    /** スケール Y (1.0 = 等倍) - メッシュ変形等に対応 */
+    var scaleY: Float = 1f
+    /** 回転角度 (度) - 将来の回転機能に対応 */
+    var rotation: Float = 0f
 }
 
 /**
@@ -60,6 +75,9 @@ class CanvasDocument(val width: Int, val height: Int) {
     private var nextLayerId = 1
     /** レイヤー名の一意インデックス（削除後の重複防止） */
     val nextLayerNameIndex: Int get() = nextLayerId
+
+    /** 表示順序カウンタ（フォルダとレイヤーの統一的な層順管理用） */
+    private var nextDisplayOrder = 0
 
     // Undo
     private val undoStack = ArrayList<UndoEntry>(50)
@@ -105,6 +123,7 @@ class CanvasDocument(val width: Int, val height: Int) {
     fun addLayer(name: String, atIndex: Int = _layers.size): Layer = lock.withLock {
         forceEndStrokeIfNeeded()
         val l = Layer(nextLayerId++, name, TiledSurface(width, height))
+        l.displayOrder = nextDisplayOrder++
         _layers.add(atIndex, l)
         if (activeLayerId < 0) activeLayerId = l.id
         PaintDebug.d(PaintDebug.Layer) { "[addLayer] id=${l.id} name=$name atIndex=$atIndex total=${_layers.size}" }
@@ -340,8 +359,9 @@ class CanvasDocument(val width: Int, val height: Int) {
             }
 
             // 選択マスクが有効な場合: 選択範囲外のピクセルを元に戻す
+            // (ストローク中に選択解除された場合でも復元が必要)
             val snap = _strokeSelSnapshot
-            if (snap != null && selectionManager.hasSelection) {
+            if (snap != null) {
                 restoreOutsideSelectionFromSurface(layer.content, snap)
             }
             _strokeSelSnapshot?.clear() // COW 参照を解放
@@ -350,7 +370,11 @@ class CanvasDocument(val width: Int, val height: Int) {
         // COW 参照を解放してからクリア
         for (e in redoStack) releaseUndoEntry(e)
         redoStack.clear()
-        dirtyTracker.markFullRebuild()
+        // Indirect ブラシ（筆/水彩）の場合のみ全タイル再合成が必要
+        // (Direct ブラシは strokeTo 内の markDirty で十分)
+        if (brush.indirect) {
+            dirtyTracker.markFullRebuild()
+        }
     }
 
     /** ストローク中にレイヤー切替等が起きた場合の強制確定 */
@@ -373,8 +397,9 @@ class CanvasDocument(val width: Int, val height: Int) {
                 layer.sublayer = null
             }
             // 選択マスクが有効な場合: 選択範囲外のピクセルを元に戻す
+            // (ストローク中に選択解除された場合でも復元が必要)
             val snap = _strokeSelSnapshot
-            if (snap != null && selectionManager.hasSelection) {
+            if (snap != null) {
                 restoreOutsideSelectionFromSurface(layer.content, snap)
             }
         }
@@ -431,6 +456,7 @@ class CanvasDocument(val width: Int, val height: Int) {
         // クリッピング用ベースタイル追跡
         var clipBaseTile: IntArray? = null
         var isBaseVisible = false
+        var clipBaseGroupId: Int = -1  // ベースレイヤーが属するグループID
 
         for (layer in _layers) {
             // --- グループ非表示チェック ---
@@ -442,9 +468,18 @@ class CanvasDocument(val width: Int, val height: Int) {
             // --- クリッピングベース状態の更新 ---
             // 非クリッピングレイヤー = 新しいベース候補
             if (!layer.isClipToBelow) {
+                // グループが変わったらクリップ状態をリセット（フォルダ境界をまたがない）
+                if (layer.groupId != clipBaseGroupId) {
+                    clipBaseTile = null
+                    isBaseVisible = false
+                }
+                clipBaseGroupId = layer.groupId
+
                 val layerVisible = layer.isVisible && (layer.opacity * 255f).toInt() > 0
                 val mainTile = layer.content.getTile(tx, ty)
-                val subTile = layer.sublayer?.getTile(tx, ty)
+                // sublayer はエンジンスレッドで変更される可能性があるため、ローカルにコピー
+                val sublayerSnapshot = layer.sublayer
+                val subTile = sublayerSnapshot?.getTile(tx, ty)
                 val hasTile = mainTile != null || subTile != null
 
                 if (layerVisible && hasTile) {
@@ -463,11 +498,13 @@ class CanvasDocument(val width: Int, val height: Int) {
             val op255 = (layer.opacity * 255f).toInt(); if (op255 <= 0) continue
 
             val mainTile = layer.content.getTile(tx, ty)
-            val subTile = layer.sublayer?.getTile(tx, ty)
+            // sublayer はエンジンスレッドで変更される可能性があるため、ローカルにコピー
+            val sublayerSnapshot = layer.sublayer
+            val subTile = sublayerSnapshot?.getTile(tx, ty)
 
-            // クリッピングレイヤーの場合: ベースが非表示 or ベースタイルなし → スキップ
+            // クリッピングレイヤーの場合: ベースが非表示 / タイルなし / グループ違い → スキップ
             if (layer.isClipToBelow) {
-                if (!isBaseVisible || clipBaseTile == null) continue
+                if (!isBaseVisible || clipBaseTile == null || layer.groupId != clipBaseGroupId) continue
             }
 
             if (mainTile == null && subTile == null) {
@@ -1196,19 +1233,31 @@ class CanvasDocument(val width: Int, val height: Int) {
     /**
      * 選択範囲外のピクセルを COW スナップショットから復元する (タイル単位)。
      * toPixelArray() を使わないため、メモリ効率が大幅に向上。
+     * 最適化: 選択範囲の境界内のタイルのみ処理
      */
     private fun restoreOutsideSelectionFromSurface(surface: TiledSurface, original: TiledSurface) {
         val w = width; val h = height
         val sm = selectionManager
-        for (ty in 0 until surface.tilesY) {
-            for (tx in 0 until surface.tilesX) {
+        val bounds = sm.getBounds() ?: return  // 選択範囲がない場合は何もしない
+        val (bx0, by0, bx1, by1) = listOf(bounds[0], bounds[1], bounds[2], bounds[3])
+
+        // 選択範囲に関連するタイルのみを処理
+        val tyMin = (by0 / Tile.SIZE).coerceIn(0, surface.tilesY - 1)
+        val tyMax = ((by1 + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, surface.tilesY - 1)
+        val txMin = (bx0 / Tile.SIZE).coerceIn(0, surface.tilesX - 1)
+        val txMax = ((bx1 + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, surface.tilesX - 1)
+
+        for (ty in tyMin..tyMax) {
+            for (tx in txMin..txMax) {
                 val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
                 var needsRestore = false
                 // このタイル内に選択範囲外ピクセルがあるかチェック
                 check@ for (ly in 0 until Tile.SIZE) {
-                    val py = by + ly; if (py >= h) break
+                    val py = by + ly; if (py >= h || py >= by1) break
+                    if (py < by0) continue
                     for (lx in 0 until Tile.SIZE) {
-                        val px = bx + lx; if (px >= w) break
+                        val px = bx + lx; if (px >= w || px >= bx1) break
+                        if (px < bx0) continue
                         if (sm.getMaskValue(px, py) < 255) { needsRestore = true; break@check }
                     }
                 }
@@ -1216,9 +1265,11 @@ class CanvasDocument(val width: Int, val height: Int) {
                 val origTile = original.getTile(tx, ty)
                 val tile = surface.getOrCreateMutable(tx, ty)
                 for (ly in 0 until Tile.SIZE) {
-                    val py = by + ly; if (py >= h) break
+                    val py = by + ly; if (py >= h || py >= by1) break
+                    if (py < by0) continue
                     for (lx in 0 until Tile.SIZE) {
-                        val px = bx + lx; if (px >= w) break
+                        val px = bx + lx; if (px >= w || px >= bx1) break
+                        if (px < bx0) continue
                         val maskVal = sm.getMaskValue(px, py)
                         if (maskVal == 255) continue
                         val idx = ly * Tile.SIZE + lx
@@ -1242,24 +1293,37 @@ class CanvasDocument(val width: Int, val height: Int) {
     private fun restoreOutsideSelection(surface: TiledSurface, originalPixels: IntArray) {
         val w = width; val h = height
         val sm = selectionManager
-        for (ty in 0 until surface.tilesY) {
-            for (tx in 0 until surface.tilesX) {
+        val bounds = sm.getBounds() ?: return  // 選択範囲がない場合は何もしない
+        val (bx0, by0, bx1, by1) = listOf(bounds[0], bounds[1], bounds[2], bounds[3])
+
+        // 選択範囲に関連するタイルのみを処理
+        val tyMin = (by0 / Tile.SIZE).coerceIn(0, surface.tilesY - 1)
+        val tyMax = ((by1 + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, surface.tilesY - 1)
+        val txMin = (bx0 / Tile.SIZE).coerceIn(0, surface.tilesX - 1)
+        val txMax = ((bx1 + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, surface.tilesX - 1)
+
+        for (ty in tyMin..tyMax) {
+            for (tx in txMin..txMax) {
                 val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
                 var needsRestore = false
                 // このタイル内に選択範囲外ピクセルがあるかチェック
                 check@ for (ly in 0 until Tile.SIZE) {
-                    val py = by + ly; if (py >= h) break
+                    val py = by + ly; if (py >= h || py >= by1) break
+                    if (py < by0) continue
                     for (lx in 0 until Tile.SIZE) {
-                        val px = bx + lx; if (px >= w) break
+                        val px = bx + lx; if (px >= w || px >= bx1) break
+                        if (px < bx0) continue
                         if (sm.getMaskValue(px, py) < 255) { needsRestore = true; break@check }
                     }
                 }
                 if (!needsRestore) continue
                 val tile = surface.getOrCreateMutable(tx, ty)
                 for (ly in 0 until Tile.SIZE) {
-                    val py = by + ly; if (py >= h) break
+                    val py = by + ly; if (py >= h || py >= by1) break
+                    if (py < by0) continue
                     for (lx in 0 until Tile.SIZE) {
-                        val px = bx + lx; if (px >= w) break
+                        val px = bx + lx; if (px >= w || px >= bx1) break
+                        if (px < bx0) continue
                         val maskVal = sm.getMaskValue(px, py)
                         if (maskVal == 255) continue  // 完全選択 → 変更後の値を維持
                         val idx = ly * Tile.SIZE + lx
@@ -1286,8 +1350,16 @@ class CanvasDocument(val width: Int, val height: Int) {
     private fun maskSublayerWithSelection(sub: TiledSurface) {
         val w = width; val h = height
         val sm = selectionManager
-        for (ty in 0 until sub.tilesY) {
-            for (tx in 0 until sub.tilesX) {
+        val bounds = sm.getBounds()
+
+        // 選択範囲に関連するタイルのみを処理
+        val tyMin = if (bounds != null) (bounds[1] / Tile.SIZE).coerceIn(0, sub.tilesY - 1) else 0
+        val tyMax = if (bounds != null) ((bounds[3] + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, sub.tilesY - 1) else sub.tilesY - 1
+        val txMin = if (bounds != null) (bounds[0] / Tile.SIZE).coerceIn(0, sub.tilesX - 1) else 0
+        val txMax = if (bounds != null) ((bounds[2] + Tile.SIZE - 1) / Tile.SIZE).coerceIn(0, sub.tilesX - 1) else sub.tilesX - 1
+
+        for (ty in tyMin..tyMax) {
+            for (tx in txMin..txMax) {
                 val tile = sub.getTile(tx, ty) ?: continue
                 val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
                 var modified = false
@@ -1375,9 +1447,9 @@ class CanvasDocument(val width: Int, val height: Int) {
         } else {
             name
         }
-        val group = LayerGroupInfo(nextGroupId++, finalName)
+        val group = LayerGroupInfo(nextGroupId++, finalName, displayOrder = nextDisplayOrder++)
         _layerGroups[group.id] = group
-        PaintDebug.d(PaintDebug.Layer) { "[createLayerGroup] id=${group.id} name=$finalName" }
+        PaintDebug.d(PaintDebug.Layer) { "[createLayerGroup] id=${group.id} name=$finalName displayOrder=${group.displayOrder}" }
         group
     }
 
@@ -1386,18 +1458,32 @@ class CanvasDocument(val width: Int, val height: Int) {
      * nextGroupId も更新して ID 衝突を防ぐ。
      */
     fun importLayerGroup(group: LayerGroupInfo) = lock.withLock {
+        // displayOrder の初期化（インポート時に新規割り当て）
+        if (group.displayOrder <= 0) {
+            group.displayOrder = nextDisplayOrder++
+        } else if (group.displayOrder >= nextDisplayOrder) {
+            nextDisplayOrder = group.displayOrder + 1
+        }
         _layerGroups[group.id] = group
         if (group.id >= nextGroupId) nextGroupId = group.id + 1
-        PaintDebug.d(PaintDebug.Layer) { "[importLayerGroup] id=${group.id} name=${group.name}" }
+        PaintDebug.d(PaintDebug.Layer) { "[importLayerGroup] id=${group.id} name=${group.name} displayOrder=${group.displayOrder}" }
     }
 
     fun deleteLayerGroup(groupId: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        pushUndoStructural()
         _layerGroups.remove(groupId)
-        // グループ内のレイヤーをグループ解除
-        for (layer in _layers) {
-            if (layer.groupId == groupId) layer.groupId = 0
+        // フォルダ内のレイヤーを削除
+        val toRemove = _layers.filter { it.groupId == groupId }
+        _layers.removeAll(toRemove)
+        // 削除後にレイヤーが0枚になったら空レイヤーを補充
+        if (_layers.isEmpty()) addLayer("レイヤー 1")
+        // activeLayerId が削除対象に含まれていたら先頭レイヤーに切り替え
+        if (toRemove.any { it.id == activeLayerId }) {
+            activeLayerId = _layers.first().id
         }
-        PaintDebug.d(PaintDebug.Layer) { "[deleteLayerGroup] id=$groupId" }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[deleteLayerGroup] id=$groupId removed=${toRemove.size} layers" }
     }
 
     fun setLayerGroup(layerId: Int, groupId: Int) = lock.withLock {

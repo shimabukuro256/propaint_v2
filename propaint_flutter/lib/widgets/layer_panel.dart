@@ -27,10 +27,25 @@ class _LayerPanelState extends State<LayerPanel> {
   int? _dropInsertIndex;      // ドロップ挿入インデックス
   bool _dropIntoFolder = false; // true=フォルダ内、false=フォルダ間
   Timer? _hoverTimer;         // 0.5秒ホバー展開タイマー
+  Set<int>? _draggedSelectedIds; // ドラッグ開始時の複数選択ID保存
+  Set<int>? _collapsedDuringDrag; // ドラッグ中に折りたたんだフォルダID（復元用）
+
+  // オートスクロール関連
+  final ScrollController _listScrollController = ScrollController();
+  Timer? _autoScrollTimer;
+  static const double _autoScrollTriggerZone = 80; // 上下 80dp のゾーン
+
+  // ピクセル移動機能関連
+  bool _isPixelMoveMode = false;  // ピクセル移動モード中か
+  double _pixelOffsetX = 0;       // ピクセルオフセット X
+  double _pixelOffsetY = 0;       // ピクセルオフセット Y
+  Offset? _pixelMovePressPos;     // ピクセル移動開始時のポインター位置
 
   @override
   void dispose() {
     _hoverTimer?.cancel();
+    _autoScrollTimer?.cancel();
+    _listScrollController.dispose();
     super.dispose();
   }
 
@@ -55,6 +70,53 @@ class _LayerPanelState extends State<LayerPanel> {
       } else {
         _expandedGroupIds.add(groupId);
       }
+    });
+  }
+
+  /// ドラッグ中のマウス位置からオートスクロールを処理
+  void _handleAutoScrollOnDragMove(double dragPositionY) {
+    if (_draggingId == null) {
+      _autoScrollTimer?.cancel();
+      return;
+    }
+
+    // ListViewのビルドコンテキストから RenderBox を取得（相対位置計算用）
+    final RenderObject? renderObject =
+        context.findRenderObject();
+    if (renderObject is! RenderBox) return;
+
+    final listHeight = renderObject.size.height;
+    final topThreshold = _autoScrollTriggerZone;
+    final bottomThreshold = listHeight - _autoScrollTriggerZone;
+
+    // ドラッグ位置がリスト領域の上下端にあるかチェック
+    if (dragPositionY < topThreshold) {
+      // 上にスクロール
+      _startAutoScroll(-1);
+    } else if (dragPositionY > bottomThreshold) {
+      // 下にスクロール
+      _startAutoScroll(1);
+    } else {
+      // スクロール停止
+      _autoScrollTimer?.cancel();
+    }
+  }
+
+  /// オートスクロール開始
+  void _startAutoScroll(int direction) {
+    if (_autoScrollTimer?.isActive == true) return;
+
+    _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (!_listScrollController.hasClients) return;
+
+      final scrollDelta = direction > 0 ? 8.0 : -8.0;
+      final newOffset =
+          (_listScrollController.offset + scrollDelta).clamp(
+        0.0,
+        _listScrollController.position.maxScrollExtent,
+      );
+
+      _listScrollController.jumpTo(newOffset);
     });
   }
 
@@ -141,18 +203,58 @@ class _LayerPanelState extends State<LayerPanel> {
   void _onDropLayer(int draggedId, int targetIndex, bool intoFolder) {
     if (targetIndex < 0 || targetIndex >= displayItems.length) return;
 
-    final oldItem = displayItems.firstWhere((item) => item.layer.id == draggedId, orElse: () => displayItems[0]);
     final targetItem = displayItems[targetIndex];
+    final draggedItem = displayItems.firstWhere((item) => item.layer.id == draggedId, orElse: () => displayItems[0]);
 
-    if (intoFolder && targetItem.layer.isGroup) {
-      // フォルダ内に移動
-      widget.channel.setLayerGroup(draggedId, -targetItem.layer.id);
+    // 複数選択時の処理
+    if (_draggedSelectedIds != null && _draggedSelectedIds!.isNotEmpty) {
+      // 複数選択：フォルダ内への移動または同じ階層への移動
+      if (intoFolder && targetItem.layer.isGroup) {
+        // フォルダ内に移動：複数選択されたすべてのアイテムを移動
+        for (final id in _draggedSelectedIds!) {
+          widget.channel.setLayerGroup(id, -targetItem.layer.id);
+        }
+      } else if (!intoFolder) {
+        // 同じ階層への移動：複数選択されたアイテムの最初のものを targetItem と比較して移動
+        // 相対順序を保持するため、全てを targetItem と比較するのではなく、
+        // 最初のアイテムを targetItem と比較し、その他は順序を維持する
+        final firstId = _draggedSelectedIds!.first;
+        final firstItemIndex = displayItems.indexWhere((item) => item.layer.id == firstId);
+        if (firstItemIndex >= 0) {
+          final firstItem = displayItems[firstItemIndex];
+          final isFirstGroup = firstItem.layer.isGroup;
+          final isTargetGroup = targetItem.layer.isGroup;
+
+          // 最初のアイテムと targetItem を比較して移動
+          if (isFirstGroup && isTargetGroup) {
+            widget.channel.reorderLayerGroup(-firstItem.layer.id, -targetItem.layer.id);
+          } else if (!isFirstGroup && !isTargetGroup) {
+            widget.channel.reorderLayer(firstItem.docIndex, targetItem.docIndex);
+          } else {
+            // フォルダ＆レイヤー混在 → displayOrder で並び替え
+            widget.channel.reorderDisplayItem(firstId, targetItem.layer.id);
+          }
+        }
+      }
     } else {
-      // レイヤー順序の変更
-      if (!oldItem.layer.isGroup && !targetItem.layer.isGroup) {
-        widget.channel.reorderLayer(oldItem.docIndex, targetItem.docIndex);
-      } else if (oldItem.layer.isGroup && targetItem.layer.isGroup) {
-        widget.channel.reorderLayerGroup(-oldItem.layer.id, -targetItem.layer.id);
+      // 単一選択の場合
+      if (intoFolder && targetItem.layer.isGroup) {
+        // フォルダ内に移動
+        widget.channel.setLayerGroup(draggedId, -targetItem.layer.id);
+      } else if (!intoFolder) {
+        // 同じ階層への移動：フォルダ＆レイヤー混在対応
+        final isGroupDragged = draggedItem.layer.isGroup;
+        final isGroupTarget = targetItem.layer.isGroup;
+
+        // フォルダ同士またはレイヤー同士 → 専用のメソッドを使用
+        if (isGroupDragged && isGroupTarget) {
+          widget.channel.reorderLayerGroup(-draggedItem.layer.id, -targetItem.layer.id);
+        } else if (!isGroupDragged && !isGroupTarget) {
+          widget.channel.reorderLayer(draggedItem.docIndex, targetItem.docIndex);
+        } else {
+          // フォルダ＆レイヤー混在 → displayOrder で並び替え
+          widget.channel.reorderDisplayItem(draggedId, targetItem.layer.id);
+        }
       }
     }
 
@@ -160,6 +262,8 @@ class _LayerPanelState extends State<LayerPanel> {
       _draggingId = null;
       _dropInsertIndex = null;
       _dragOverGroupId = null;
+      _draggedSelectedIds = null;
+      _selectedIds.clear(); // ドロップ後に複数選択を解除
     });
   }
 
@@ -167,47 +271,54 @@ class _LayerPanelState extends State<LayerPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Kotlin 側で displayOrder でソート済みなので、reversed でUI表示順に
     final allLayers = widget.state.layers.reversed.toList(); // UI表示用（上が先）
     final hasSelection = _selectedIds.isNotEmpty;
 
-    final folders = allLayers.where((l) => l.isGroup).toList();
-    final nonGroupLayers = allLayers.where((l) => !l.isGroup).toList();
-
-    // doc.layers インデックス計算用（Kotlin側の元の順序、非グループのみ）
-    final docLayers = widget.state.layers.where((l) => !l.isGroup).toList();
-
-    // displayItems を構築
+    // displayItems を displayOrder に従って構築
+    // （Kotlin側でソート済みだが、念のため順序を保持）
     displayItems = <_LayerDisplayItem>[];
-    for (final folder in folders) {
-      displayItems.add(_LayerDisplayItem(
-        layer: folder,
-        depth: 0,
-        docIndex: -1, // フォルダにはdocIndexは不要
-      ));
-      if (_expandedGroupIds.contains(folder.id)) {
-        final groupLayers = nonGroupLayers.where((l) => l.groupId == -folder.id).toList();
-        for (final layer in groupLayers) {
-          final layerDocIndex = docLayers.indexWhere((l) => l.id == layer.id);
-          displayItems.add(_LayerDisplayItem(
-            layer: layer,
-            depth: 1,
-            parentGroupId: folder.id,
-            docIndex: layerDocIndex,
-          ));
-        }
-      }
-    }
 
-    for (final layer in nonGroupLayers) {
-      if (layer.groupId == 0) {
-        final layerDocIndex = docLayers.indexWhere((l) => l.id == layer.id);
+    // doc.layers インデックス計算用（非グループのみ）
+    // allLayers と同じ順序で計算（reversed）
+    final docLayers = widget.state.layers.where((l) => !l.isGroup).toList().reversed.toList();
+
+    // allLayers はすでに displayOrder でソート済み（Kotlin側）
+    // ここではそのままの順序で displayItems を構築
+    for (final item in allLayers) {
+      if (item.isGroup) {
+        // フォルダを追加
         displayItems.add(_LayerDisplayItem(
-          layer: layer,
+          layer: item,
+          depth: 0,
+          docIndex: -1, // フォルダにはdocIndexは不要
+        ));
+        // フォルダが展開されている場合、子レイヤーを追加
+        if (_expandedGroupIds.contains(item.id)) {
+          final groupLayers = allLayers.where((l) => !l.isGroup && l.groupId == -item.id).toList();
+          for (final layer in groupLayers) {
+            final layerDocIndex = docLayers.indexWhere((l) => l.id == layer.id);
+            displayItems.add(_LayerDisplayItem(
+              layer: layer,
+              depth: 1,
+              parentGroupId: item.id,
+              docIndex: layerDocIndex,
+            ));
+          }
+        }
+      } else if (item.groupId == 0) {
+        // ルートレベルのレイヤーを追加
+        final layerDocIndex = docLayers.indexWhere((l) => l.id == item.id);
+        displayItems.add(_LayerDisplayItem(
+          layer: item,
           depth: 0,
           docIndex: layerDocIndex,
         ));
       }
     }
+
+    // 利用可能なフォルダ一覧（レイヤー移動用）
+    final folders = allLayers.where((l) => l.isGroup).toList();
 
     return PanelCard(
       width: 280,
@@ -231,6 +342,36 @@ class _LayerPanelState extends State<LayerPanel> {
                     style: const TextStyle(color: C.accent, fontSize: 13, fontWeight: FontWeight.w600),
                   ),
                   const Spacer(),
+                  _SmallIconButton(
+                    icon: Icons.keyboard_arrow_up_rounded,
+                    color: C.textSecondary,
+                    tooltip: '上に移動',
+                    onTap: () {
+                      // フォルダを除外して、レイヤーのみを移動
+                      final layerIds = widget.state.layers
+                          .where((l) => !l.isGroup && _selectedIds.contains(l.id))
+                          .map((l) => l.id)
+                          .toList();
+                      if (layerIds.isNotEmpty) {
+                        widget.channel.batchMoveLayersUp(layerIds);
+                      }
+                    },
+                  ),
+                  _SmallIconButton(
+                    icon: Icons.keyboard_arrow_down_rounded,
+                    color: C.textSecondary,
+                    tooltip: '下に移動',
+                    onTap: () {
+                      // フォルダを除外して、レイヤーのみを移動
+                      final layerIds = widget.state.layers
+                          .where((l) => !l.isGroup && _selectedIds.contains(l.id))
+                          .map((l) => l.id)
+                          .toList();
+                      if (layerIds.isNotEmpty) {
+                        widget.channel.batchMoveLayersDown(layerIds);
+                      }
+                    },
+                  ),
                   if (_selectedIds.length >= 2)
                     _SmallTextButton(label: '結合', onTap: _mergeSelected),
                   _SmallIconButton(
@@ -263,6 +404,7 @@ class _LayerPanelState extends State<LayerPanel> {
           // レイヤー一覧（カスタムドラッグ＆ドロップ対応）
           Flexible(
             child: ListView.builder(
+              controller: _listScrollController,
               shrinkWrap: true,
               padding: const EdgeInsets.only(bottom: 8),
               itemCount: displayItems.length,
@@ -296,15 +438,36 @@ class _LayerPanelState extends State<LayerPanel> {
                     ),
                   ),
                   onDragStarted: () {
-                    setState(() => _draggingId = layer.id);
+                    // 複数選択されている場合は、選択状態を保存
+                    if (_selectedIds.contains(layer.id) && _selectedIds.length > 1) {
+                      _draggedSelectedIds = Set.from(_selectedIds);
+                    }
+
+                    // ドラッグされたアイテムがフォルダの場合、移動中は折りたたむ
+                    setState(() {
+                      _draggingId = layer.id;
+                      if (isFolder && _expandedGroupIds.contains(layer.id)) {
+                        _collapsedDuringDrag ??= {};
+                        _collapsedDuringDrag!.add(layer.id);
+                        _expandedGroupIds.remove(layer.id);
+                      }
+                    });
                   },
                   onDragEnd: (_) {
                     setState(() {
                       _draggingId = null;
                       _dropInsertIndex = null;
                       _dragOverGroupId = null;
+                      _draggedSelectedIds = null;
+
+                      // ドラッグ中に折りたたんだフォルダを復元
+                      if (_collapsedDuringDrag != null) {
+                        _expandedGroupIds.addAll(_collapsedDuringDrag!);
+                        _collapsedDuringDrag = null;
+                      }
                     });
                     _hoverTimer?.cancel();
+                    _autoScrollTimer?.cancel();
                   },
                   child: DragTarget<int>(
                     onMove: (details) {
@@ -316,11 +479,15 @@ class _LayerPanelState extends State<LayerPanel> {
                         _dropInsertIndex = i;
                         _dropIntoFolder = isFolder;
                       });
+
+                      // オートスクロール判定
+                      _handleAutoScrollOnDragMove(details.offset.dy);
                     },
                     onLeave: (_) {
                       if (isFolder) {
                         _onDragLeaveFolder();
                       }
+                      _autoScrollTimer?.cancel();
                     },
                     onAcceptWithDetails: (details) {
                       _onDropLayer(details.data, i, isFolder);
@@ -630,6 +797,7 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
 
               // スライドするレイヤーカード
               GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onHorizontalDragUpdate: (d) {
                   setState(() {
                     _dragOffset = (_dragOffset + d.delta.dx).clamp(-_leftRevealWidth, _rightTriggerWidth);
@@ -770,6 +938,7 @@ class _LayerItem extends StatelessWidget {
                   if (layer.isGroup)
                     GestureDetector(
                       onTap: onToggleGroup,
+                      behavior: HitTestBehavior.opaque,
                       child: Padding(
                         padding: const EdgeInsets.only(right: 4),
                         child: Icon(

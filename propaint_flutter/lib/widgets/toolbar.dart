@@ -137,39 +137,6 @@ class PaintToolbar extends StatelessWidget {
             tooltip: '選択ペン',
           ),
 
-          // 選択消しペン
-          _ToolbarIcon(
-            icon: Icons.cleaning_services_rounded,
-            onPressed: () {
-              channel.setToolMode('SelectEraser');
-              onTogglePanel(PanelType.selectionTool);
-            },
-            isActive: state.toolMode == 'SelectEraser',
-            tooltip: '選択消しペン',
-          ),
-
-          // 矩形選択
-          _ToolbarIcon(
-            icon: Icons.crop_square_rounded,
-            onPressed: () {
-              channel.setToolMode('SelectRect');
-              onTogglePanel(PanelType.selection);
-            },
-            isActive: state.toolMode == 'SelectRect',
-            tooltip: '矩形選択',
-          ),
-
-          // 楕円選択
-          _ToolbarIcon(
-            icon: Icons.circle_outlined,
-            onPressed: () {
-              channel.setToolMode('SelectEllipse');
-              onTogglePanel(PanelType.selection);
-            },
-            isActive: state.toolMode == 'SelectEllipse',
-            tooltip: '楕円選択',
-          ),
-
           // なげなわ選択
           _ToolbarIcon(
             icon: Icons.gesture_rounded,
@@ -232,8 +199,7 @@ class PaintToolbar extends StatelessWidget {
 
     // 選択範囲関連ツールが有効か判定
     final isSelectionToolActive = const [
-      'SelectRect', 'SelectEllipse', 'SelectLasso', 'SelectMagicWand',
-      'SelectPen', 'SelectEraser'
+      'SelectLasso', 'SelectMagicWand', 'SelectPen'
     ].contains(state.toolMode);
 
     return brushDefs.map((def) {

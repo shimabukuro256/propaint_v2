@@ -4,11 +4,8 @@
         {
             "label": "build:app:debug",
             "type": "shell",
-            "command": "./gradlew",
-            "args": [
-                "clean",
-                ":app:installDebug"
-            ],
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build_and_run.ps1"],
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -24,10 +21,8 @@
         {
             "label": "build:app:debug-cache",
             "type": "shell",
-            "command": "./gradlew",
-            "args": [
-                ":app:installDebug"
-            ],
+            "command": "powershell",
+            "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/build_and_run.ps1", "-UseCache"],
             "group": {
                 "kind": "build"
             },

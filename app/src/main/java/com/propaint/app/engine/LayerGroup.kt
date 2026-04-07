@@ -15,6 +15,7 @@ data class LayerGroupInfo(
     var isVisible: Boolean = true,
     var opacity: Float = 1f,
     var blendMode: Int = PixelOps.BLEND_NORMAL,
+    var displayOrder: Int = 0, // フォルダとレイヤーの統一的な層順管理用
 ) {
     init {
         require(id > 0) { "group id must be > 0, got $id" }

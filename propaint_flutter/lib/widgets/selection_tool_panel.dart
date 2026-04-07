@@ -248,33 +248,6 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
                 ),
                 const SizedBox(width: 4),
 
-                // Subtract mode
-                _buildModeButton(
-                  mode: 'subtract',
-                  icon: Icons.remove_circle_outline,
-                  label: 'Sub',
-                  onPressed: () {
-                    setState(() {
-                      _activeMode = 'subtract';
-                      _isAdding = false;
-                    });
-                    widget.channel.setToolMode('SelectEraser');
-                  },
-                ),
-                const SizedBox(width: 4),
-
-                // Rectangle selection
-                _buildModeButton(
-                  mode: 'rect',
-                  icon: Icons.crop_square,
-                  label: 'Rect',
-                  onPressed: () {
-                    setState(() => _activeMode = 'rect');
-                    widget.channel.setToolMode('SelectRect');
-                  },
-                ),
-                const SizedBox(width: 4),
-
                 // Clear selection
                 _buildModeButton(
                   mode: 'clear',

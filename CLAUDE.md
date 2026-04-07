@@ -13,14 +13,18 @@ app/src/main/java/com/propaint/app/
 ├── engine/        # 描画エンジン (BrushEngine, CanvasDocument, PixelOps, Tile 等)
 │                  # - 4段階ブラシサイズスケーリング（radScale）
 │                  # - Lazy Nezumi風手振れ補正（EMA + キャッチアップ）
+│                  # - レイヤーグループ（LayerGroup.kt）
 ├── gl/            # OpenGL レンダラ (表示専用、描画処理なし)
 ├── ui/            # Compose UI (PaintScreen, パネル類)
 ├── gallery/       # ギャラリー画面 (GalleryScreen, NewCanvasDialog)
 ├── viewmodel/     # PaintViewModel
 │                  # - レイヤーグループ（フォルダ）管理
 │                  # - UiLayer.isGroup / groupId フィールド
+├── io/            # ファイル I/O (ProjectFile 読み込み・保存等)
+├── model/         # データモデル (不変データクラス等)
 └── flutter/       # Flutter 連携 (MethodChannel)
                    # - レイヤーグループのCRUD操作
+                   # - 負のグループID（-gId）変換処理
 ```
 
 ### 主要機能
@@ -36,108 +40,124 @@ app/src/main/java/com/propaint/app/
 - 展開/折畳・選択・削除などの操作は機能を混同させないよう UI で区別
 - ReorderableListView など複数操作ハンドラがある場合は 衝突を避ける設計
 
+### UI インタラクション実装ルール（ジェスチャー・アニメーション系）
+
+複雑なジェスチャー操作（スワイプ、ドラッグ並び替え、長押しメニュー等）を実装する場合、
+**ボタンを追加して代替する解決策は禁止**。ユーザーが指定したジェスチャー操作を必ずそのまま実装すること。
+
+#### 指示の受け取り方
+
+ジェスチャー系の実装指示は以下の形式で提供される。これに従って実装すること。
+
+```
+■ 状態遷移: Idle → Swiping → ActionRevealed → Executing
+■ トリガー: 右スワイプ 40dp超過 → alphaLock toggle
+■ アニメーション: AnimatedContainer 200ms ease-out
+■ 連携: MethodChannel "toggleAlphaLock" → CanvasDocument.toggleAlphaLock(layerId)
+```
+
+この形式が提供されない曖昧な指示（例:「Procreateみたいにして」）の場合は、
+**実装を始める前に** 以下を確認すること:
+1. どのジェスチャーで何が起きるか（状態遷移）
+2. 閾値（dp / ms）
+3. アニメーションの種類と時間
+4. Kotlin 側のどのメソッドを呼ぶか（MethodChannel 名・引数・戻り値）
+
+#### 実装順序
+
+複数のジェスチャーを同時に実装しない。以下の順で1つずつ実装・動作確認すること:
+1. タップ（選択）
+2. 長押し → ドラッグ並び替え
+3. 横スワイプ → アクション（アルファロック、削除等）
+4. マルチタッチ（2本指タップ → マージ等）
+
+#### Flutter 側の実装パターン
+
+```dart
+// ジェスチャー状態管理の基本構造
+enum SwipeState { idle, swiping, actionRevealed }
+
+GestureDetector(
+  onHorizontalDragUpdate: (details) {
+    // dx 累積 → 閾値判定 → 状態遷移
+  },
+  onHorizontalDragEnd: (details) {
+    // 状態に応じてアクション実行 or リセット
+    // MethodChannel 経由で Kotlin 側を呼ぶ
+  },
+  onLongPressStart: (_) {
+    // ドラッグモード開始（HapticFeedback 付与）
+  },
+)
+```
+
+#### MethodChannel 連携の明示ルール
+
+ジェスチャーから Kotlin 側を呼ぶ場合、以下を全て明示すること:
+- チャンネル名: `"com.propaint.app/paint"`
+- メソッド名: 例 `"toggleAlphaLock"`
+- 引数の型: 例 `{"layerId": Int}`
+- 戻り値の型: 例 `Boolean`（成功/失敗）
+- Kotlin 側の対応メソッド: 例 `CanvasDocument.toggleAlphaLock(layerId: Int): Boolean`
+
 ---
 
-## Flutter ↔ Kotlin 連携の既知問題と対策
+## UI デザイン・インタラクション設計ワークフロー（GUI Claude ↔ CLI Claude 連携）
 
-現在、Flutter UI と Android ネイティブ (Kotlin) のハイブリッド構成に起因する重大な問題が複数存在する。
-コード修正時は以下を必ず考慮すること。
+複雑な UI（レイヤーパネル、ツールバー、ジェスチャー操作等）の設計・実装は以下のフローで行う。
 
-### 問題1: 全状態の過剰同期 (EventChannel の乱用)
+### Phase 1: GUI Claude（claude.ai）でプロトタイプ作成
 
-**症状**: UI の応答遅延・カクつき (Jank)
-**原因**: `PaintMethodChannelHandler.startStateObserver()` で全状態 Flow をマージし、何か変化するたびに `buildStateMap()` で巨大な Map を再構築して Flutter へ送信。レイヤースタック・カラーヒストリー等すべてが毎回含まれ、GC 頻発で UI スレッドがブロックされる。
+GUI 版 Claude の Artifact 機能で React/HTML の操作プロトタイプを作成する。
+ブラウザ上で実際にスワイプ・ドラッグ・タップして操作感を確認・調整する。
 
-**対策**:
-- 状態同期は**差分のみ**送信する設計に変更すること
-- 同期対象を細分化し、変更されたカテゴリ (brush / color / layer) のみ個別に通知
-- レイヤー情報など重いデータは変更時のみ送信（ストローク中は送らない）
-- ホットパスでの Map/String アロケーションを最小化
+**プロトタイプで確認すべき項目:**
+- ジェスチャーの種類と閾値（何dp / 何msで発火するか）
+- アニメーションの速度・イージング
+- 状態遷移（Idle → Swiping → ActionRevealed → Executing）
+- ビジュアルフィードバック（色変化、elevation、フェード等）
 
-### 問題2: debounce(16L) による操作中フリーズ
+### Phase 2: GUI Claude で仕様書を抽出
 
-**症状**: スライダー操作中・ストローク中に UI が固まり、指を離すと一気に反映される
-**原因**: Kotlin の `debounce` は「イベントが静止してから指定時間後に発行」する仕様。連続イベント中は一切送信されない。
+プロトタイプから状態遷移図とイベント仕様を出力する。形式例:
 
-**対策**:
-- `debounce` ではなく `sample(16L)` または `conflate` を使用すること
-- `sample` は一定間隔で最新値を発行するため、連続操作中もUIが更新される
-- ブラシサイズ等のスライダーには `conflate` が適切（最新値のみ必要）
+```
+■ コンポーネント: LayerCell
+■ 状態: Idle → Swiping → ActionRevealed → Executing
+■ 右スワイプ 40dp超過 → alphaLock toggle
+■ 左スワイプ 80dp超過 → 削除確認表示
+■ 長押し 300ms → ドラッグモード開始 → Y移動で並び替え
+■ 2本指タップ → 下レイヤーとマージ
+■ アニメーション: 200ms ease-out
+■ MethodChannel: "toggleAlphaLock" / args: {layerId: Int} / return: Boolean
+```
 
-### 問題3: onPause/onStop での同期保存による ANR
+### Phase 3: CLI Claude で Flutter/Compose 実装
 
-**症状**: バックグラウンド遷移時にクラッシュ (ANR)
-**原因**: `PaintFlutterActivity.onPause()` と `onStop()` の両方で `saveCurrentProject()` を UI スレッドで同期実行。画像圧縮等の重い I/O が UI スレッドをブロック。さらに2回連続で呼ばれるため書き込み競合・ファイル破損リスクあり。
+Phase 2 の仕様書を CLI Claude に渡し、Flutter/Compose コードに変換する。
+CLI Claude はプロジェクト全体のコンテキストを持つため、
+既存の CanvasDocument・MethodChannel・ViewModel との整合性を保った実装ができる。
 
-**対策**:
-- 保存処理は `lifecycleScope.launch(Dispatchers.IO)` で非同期実行
-- `onPause` と `onStop` の重複呼び出しを排除（フラグで制御）
-- `saveCurrentProject()` に Mutex を導入し排他制御
+**CLI Claude への指示テンプレート:**
 
-### 問題4: Activity 再生成時の状態喪失
+```
+以下の仕様に従って [Flutter/Compose] 側の [コンポーネント名] を実装してください。
 
-**症状**: ファイルピッカーから戻ると何も起きない
-**原因**: `pendingExportFormat` が通常のクラス変数で、Activity 破棄・再生成時に null にリセットされる。
+【状態遷移】
+(Phase 2 の仕様をそのまま貼る)
 
-**対策**:
-- `onSaveInstanceState` / `onRestoreInstanceState` で保存・復元
-- または `SavedStateHandle` (ViewModel) を使用
+【MethodChannel 連携】
+- チャンネル: "com.propaint.app/paint"
+- メソッド: "toggleAlphaLock"
+- 引数: {layerId: Int}
+- 戻り値: Boolean
+- Kotlin側: CanvasDocument.toggleAlphaLock(layerId)
 
-### 問題5: 自動保存と手動保存の Race Condition
-
-**症状**: プロジェクトファイル (.ppaint) の破損
-**原因**: 60秒間隔の自動保存と、ギャラリー遷移時の手動保存が同時に `saveCurrentProject()` を呼ぶ可能性。排他制御なし。
-
-**対策**:
-- `saveCurrentProject()` に `Mutex` を導入
-- 保存中フラグで二重実行を防止
-
-### 問題6: PlatformView の dispose() が空実装
-
-**症状**: 長時間使用・画面切替でメモリリーク
-**原因**: `PaintCanvasPlatformView.dispose()` の中身が空。GL コンテキストやネイティブビューが解放されない。
-
-**対策**:
-- `dispose()` で GLSurfaceView の破棄・GL リソース解放を実装
-- メモリリーク検出のためのログを追加
-
-### 問題7: レイヤー操作の一部が UI スレッドで同期実行
-
-**症状**: レイヤー操作時のフリーズ・クラッシュ
-**原因**: `moveLayerUp`, `setLayerOpacity` 等が MethodChannel 上で直接 (UI スレッド) 実行。GL テクスチャ切替を伴う場合に問題。
-
-**対策**:
-- 重い処理は全て `launchHeavy` (バックグラウンド) で実行
-- GL 操作は `queueEvent` で GL スレッドに委譲
-
-### 問題8: レイヤーグループのID変換ミス
-
-**症状**: フォルダの削除・移動が機能しない
-**原因**: 
-- `PaintViewModel` で フォルダに負のID（`id = -gId`）を振る
-- Flutter UI で この負のIDを `deleteLayerGroup()` / `setLayerGroup()` に直接渡す
-- Kotlin 側は正の `groupId` を期待しており、負のIDではマッチしない
-
-**対策**:
-- Flutter で フォルダ操作時に ID を正に変換：`deleteLayerGroup(-id)`, `setLayerGroup(layerId, -groupId)`
-- Flutter で フォルダを `selectLayer()` で選択しない（展開/折畳のみ）
-- `serializeLayers()` に `"isGroup"` フラグを含める（UI での判定用）
-
-### Flutter ↔ Kotlin 連携コード修正時のチェックリスト
-
-- [ ] MethodChannel のハンドラで重い処理を UI スレッドで実行していないか
-- [ ] EventChannel で不要なデータまで送信していないか（差分のみか）
-- [ ] `debounce` を使っていないか（`sample` / `conflate` を使うこと）
-- [ ] ライフサイクルイベント (onPause/onStop/onDestroy) で同期 I/O していないか
-- [ ] Activity 再生成で失われる状態がないか (SavedState)
-- [ ] PlatformView のリソース解放が実装されているか
-- [ ] 保存処理に排他制御 (Mutex) があるか
-- [ ] レイヤーグループのID（負 ↔ 正）を正しく変換しているか
-  - Kotlin で フォルダID は正（1, 2, 3...）
-  - Flutter では UI レベルで負のID（-1, -2, -3...）で表現
-  - 操作時に変換：`deleteLayerGroup(-id)`, `setLayerGroup(layerId, -groupId)`
-- [ ] UI 操作時のビジュアルフィードバックがあるか（ドラッグ中のハイライト、ホバー状態など）
-- [ ] 操作結果が即座に UI に反映されるか（状態同期の遅延がないか）
+【制約】
+- ボタン追加による代替は禁止
+- 1ジェスチャーずつ実装（まず右スワイプのみ）
+- 既存の LayerListState を壊さない
+```
 
 ---
 

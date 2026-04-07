@@ -163,6 +163,12 @@ class PaintChannel {
   Future<void> reorderLayerGroup(int fromGroupId, int toGroupId) =>
       _method.invokeMethod('reorderLayerGroup', {'fromGroupId': fromGroupId, 'toGroupId': toGroupId});
 
+  /// フォルダとレイヤーが混在している場合の統一的な並び替え
+  /// fromId: ドラッグ対象のレイヤーID（正数）またはグループID（正数）
+  /// toId: ドロップ対象のレイヤーID（正数）またはグループID（正数）
+  Future<void> reorderDisplayItem(int fromId, int toId) =>
+      _method.invokeMethod('reorderDisplayItem', {'fromId': fromId, 'toId': toId});
+
   // ─── 保存/エクスポート ────────────────────────────────
 
   Future<void> saveProject() => _method.invokeMethod('saveProject');
@@ -182,6 +188,12 @@ class PaintChannel {
 
   Future<void> moveLayerDown(int id) =>
       _method.invokeMethod('moveLayerDown', {'id': id});
+
+  Future<void> batchMoveLayersUp(List<int> ids) =>
+      _method.invokeMethod('batchMoveLayersUp', {'ids': ids});
+
+  Future<void> batchMoveLayersDown(List<int> ids) =>
+      _method.invokeMethod('batchMoveLayersDown', {'ids': ids});
 
   // ─── ブラシ設定のエクスポート/インポート/リセット ──────
 
@@ -386,6 +398,37 @@ class PaintChannel {
   // ─── ビュー操作 ───────────────────────────────────────
 
   Future<void> resetView() => _method.invokeMethod('resetView');
+
+  // ─── ピクセル移動機能（将来実装向け対応） ───────────────────
+
+  /// 複数レイヤーの一時的なオフセットを設定（ピクセル移動中）
+  Future<void> setLayersOffset(List<int> layerIds, double offsetX, double offsetY) =>
+      _method.invokeMethod('setLayersOffset', {
+        'layerIds': layerIds,
+        'offsetX': offsetX,
+        'offsetY': offsetY,
+      });
+
+  /// 複数レイヤーのオフセットをリセット
+  Future<void> resetLayersOffset(List<int> layerIds) =>
+      _method.invokeMethod('resetLayersOffset', {'layerIds': layerIds});
+
+  /// 複数レイヤーのピクセル移動を確定（オフセットを実際のピクセルに適用）
+  Future<void> commitPixelMovement(List<int> layerIds) =>
+      _method.invokeMethod('commitPixelMovement', {'layerIds': layerIds});
+
+  /// フォルダ内のすべての子レイヤーIDを取得
+  Future<List<int>> getLayersInGroup(int groupId) async {
+    final result = await _method.invokeMethod<List>('getLayersInGroup', {'groupId': groupId});
+    return (result ?? []).cast<int>();
+  }
+
+  /// フォルダ内のすべての子レイヤーIDを再帰的に取得
+  Future<List<int>> getLayersInGroupRecursive(int groupId) async {
+    final result =
+        await _method.invokeMethod<List>('getLayersInGroupRecursive', {'groupId': groupId});
+    return (result ?? []).cast<int>();
+  }
 
   // ─── 状態取得 ─────────────────────────────────────────
 

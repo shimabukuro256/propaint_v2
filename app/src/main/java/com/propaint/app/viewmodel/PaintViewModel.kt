@@ -50,8 +50,8 @@ enum class BrushType(
 
 enum class ToolMode {
     Draw, Eyedropper,
-    SelectRect, SelectEllipse, SelectLasso, SelectMagicWand,
-    SelectPen, SelectEraser,
+    SelectLasso, SelectMagicWand,
+    SelectPen,
     Transform,
     PixelCopy,
     ShapeLine, ShapeRect, ShapeEllipse,
@@ -855,40 +855,6 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         // スタイラス消しゴム端の自動検出
         val isEraserTip = event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
 
-        // 選択ツール (SelectRect / SelectEllipse): ドラッグで領域確定
-        if (_toolMode.value == ToolMode.SelectRect || _toolMode.value == ToolMode.SelectEllipse) {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    // スクリーン座標で保持（MOVE でリアルタイム矩形更新するため）
-                    _selectionDragStart = event.x to event.y
-                    renderer.selDragRect = floatArrayOf(event.x, event.y, event.x, event.y)
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val start = _selectionDragStart ?: return true
-                    val (sx, sy) = start
-                    renderer.selDragRect = floatArrayOf(
-                        min(sx, event.x), min(sy, event.y),
-                        max(sx, event.x), max(sy, event.y)
-                    )
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    renderer.selDragRect = null
-                    val start = _selectionDragStart
-                    if (start != null && event.actionMasked == MotionEvent.ACTION_UP) {
-                        val (sx, sy) = start
-                        val (docSX, docSY) = screenToDoc(sx, sy)
-                        val (docEX, docEY) = screenToDoc(event.x, event.y)
-                        val l = min(docSX, docEX).toInt(); val t = min(docSY, docEY).toInt()
-                        val r = max(docSX, docEX).toInt(); val b = max(docSY, docEY).toInt()
-                        if (_toolMode.value == ToolMode.SelectRect) selectRect(l, t, r, b)
-                        else selectEllipse(l, t, r, b)
-                    }
-                    _selectionDragStart = null
-                }
-            }
-            return true
-        }
-
         // 自動選択 (MagicWand): タップ位置で色選択
         if (_toolMode.value == ToolMode.SelectMagicWand) {
             if (event.actionMasked == MotionEvent.ACTION_UP) {
@@ -952,9 +918,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
-        // 選択ペン / 選択消しペン: ブラシサイズでマスクをペイント
-        if (_toolMode.value == ToolMode.SelectPen || _toolMode.value == ToolMode.SelectEraser) {
-            val isAdd = _toolMode.value == ToolMode.SelectPen
+        // 選択ペン: ブラシサイズでマスクをペイント
+        if (_toolMode.value == ToolMode.SelectPen) {
+            val isAdd = true
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     doc.selectionManager.ensureMask()
@@ -1288,6 +1254,96 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         doc.reorderLayerGroup(fromGroupId, toGroupId)
         updateLayerState()
     }
+
+    /// フォルダとレイヤーが混在している場合の統一的な並び替え
+    /// fromId/toId: レイヤーID またはグループID（グループは負数）
+    fun reorderDisplayItem(fromId: Int, toId: Int) {
+        val doc = _document ?: return
+
+        // グループID（負数）を正に変換
+        val actualFromId = if (fromId < 0) -fromId else fromId
+        val actualToId = if (toId < 0) -toId else toId
+
+        // fromId と toId のアイテムを取得
+        val fromLayer = doc.layers.find { it.id == actualFromId }
+        val fromGroup = doc.layerGroups[actualFromId]
+        val fromItem = fromLayer ?: (fromGroup?.let { it as Any })
+        val fromDisplayOrder = fromLayer?.displayOrder ?: fromGroup?.displayOrder ?: return
+
+        val toLayer = doc.layers.find { it.id == actualToId }
+        val toGroup = doc.layerGroups[actualToId]
+        val toItem = toLayer ?: (toGroup?.let { it as Any })
+        val toDisplayOrder = toLayer?.displayOrder ?: toGroup?.displayOrder ?: return
+
+        if (fromDisplayOrder == toDisplayOrder) return
+
+        // 移動方向を判定して、途中のアイテムを シフトして順序を保持
+        val allItems = (doc.layers.map { it as Any } + doc.layerGroups.values.map { it as Any })
+            .sortedBy {
+                when (it) {
+                    is Layer -> it.displayOrder
+                    is LayerGroupInfo -> it.displayOrder
+                    else -> 0
+                }
+            }
+
+        if (fromDisplayOrder < toDisplayOrder) {
+            // fromId が上にある（displayOrder が小さい）→ 下に移動
+            // fromId の次から toId までを1つ上にシフト
+            for (item in allItems) {
+                val order = when (item) {
+                    is Layer -> item.displayOrder
+                    is LayerGroupInfo -> item.displayOrder
+                    else -> continue
+                }
+                if (order > fromDisplayOrder && order <= toDisplayOrder) {
+                    when (item) {
+                        is Layer -> item.displayOrder -= 1
+                        is LayerGroupInfo -> item.displayOrder -= 1
+                    }
+                }
+            }
+            // fromId を toId と同じ位置に移動
+            when (fromItem) {
+                is Layer -> fromItem.displayOrder = toDisplayOrder - 1
+                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder - 1
+            }
+        } else {
+            // fromId が下にある（displayOrder が大きい）→ 上に移動
+            // toId から fromId の前までを1つ下にシフト
+            for (item in allItems) {
+                val order = when (item) {
+                    is Layer -> item.displayOrder
+                    is LayerGroupInfo -> item.displayOrder
+                    else -> continue
+                }
+                if (order >= toDisplayOrder && order < fromDisplayOrder) {
+                    when (item) {
+                        is Layer -> item.displayOrder += 1
+                        is LayerGroupInfo -> item.displayOrder += 1
+                    }
+                }
+            }
+            // fromId を toId と同じ位置に移動
+            when (fromItem) {
+                is Layer -> fromItem.displayOrder = toDisplayOrder + 1
+                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder + 1
+            }
+        }
+
+        // displayOrder 変更に加えて、レイヤーリスト内の実際の順序も更新
+        // (rebuildCompositeTile が正しい順序で合成されるようにするため)
+        if (fromLayer != null && toLayer != null) {
+            val fromIdx = doc.layers.indexOfFirst { it.id == actualFromId }
+            val toIdx = doc.layers.indexOfFirst { it.id == actualToId }
+            if (fromIdx >= 0 && toIdx >= 0) {
+                doc.moveLayer(fromIdx, toIdx)
+            }
+        }
+
+        updateLayerState()
+    }
+
     fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; hasUnsavedChanges = true; updateLayerState() }
     fun duplicateLayer(id: Int) { _document?.duplicateLayer(id); updateLayerState() }
     fun mergeDown(id: Int) { _document?.mergeDown(id); updateLayerState() }
@@ -1302,6 +1358,91 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         val idx = doc.layers.indexOfFirst { it.id == id }; if (idx <= 0) return
         doc.moveLayer(idx, idx - 1); updateLayerState()
     }
+    fun batchMoveLayersUp(ids: List<Int>) {
+        val doc = _document ?: return
+        // 上に移動するときは高インデックス順に処理してインデックスずれを防ぐ
+        val sorted = ids.mapNotNull { id ->
+            val idx = doc.layers.indexOfFirst { it.id == id }
+            if (idx >= 0) Pair(id, idx) else null
+        }.sortedByDescending { it.second }
+        for ((_, idx) in sorted) {
+            if (idx < doc.layers.size - 1) doc.moveLayer(idx, idx + 1)
+        }
+        updateLayerState()
+    }
+    fun batchMoveLayersDown(ids: List<Int>) {
+        val doc = _document ?: return
+        // 下に移動するときは低インデックス順に処理してインデックスずれを防ぐ
+        val sorted = ids.mapNotNull { id ->
+            val idx = doc.layers.indexOfFirst { it.id == id }
+            if (idx >= 0) Pair(id, idx) else null
+        }.sortedBy { it.second }
+        for ((_, idx) in sorted) {
+            if (idx > 0) doc.moveLayer(idx, idx - 1)
+        }
+        updateLayerState()
+    }
+
+    // ── ピクセル移動機能対応 ──
+    /** 複数レイヤーの一時的なオフセットを設定（ピクセル移動中に使用） */
+    fun setLayersOffset(ids: List<Int>, offsetX: Float, offsetY: Float) {
+        val doc = _document ?: return
+        for (id in ids) {
+            val layer = doc.layers.find { it.id == id } ?: continue
+            layer.offsetX = offsetX
+            layer.offsetY = offsetY
+        }
+        // ピクセル移動プレビューを描画させるため全タイル再合成
+        doc.dirtyTracker.markFullRebuild()
+        updateLayerState()
+    }
+
+    /** 複数レイヤーのオフセットをリセット */
+    fun resetLayersOffset(ids: List<Int>) {
+        val doc = _document ?: return
+        for (id in ids) {
+            val layer = doc.layers.find { it.id == id } ?: continue
+            layer.offsetX = 0f
+            layer.offsetY = 0f
+        }
+        // ピクセル移動プレビューをリセットして描画
+        doc.dirtyTracker.markFullRebuild()
+        updateLayerState()
+    }
+
+    /** フォルダ内のすべての子レイヤーIDを取得（フォルダ選択時の一括処理用） */
+    fun getLayersInGroup(groupId: Int): List<Int> {
+        val doc = _document ?: return emptyList()
+        return doc.layers.filter { it.groupId == groupId }.map { it.id }
+    }
+
+    /** フォルダ内のすべての子レイヤーIDを取得（現在はgetLayersInGroupと同一） */
+    fun getLayersInGroupRecursive(groupId: Int): List<Int> {
+        // 将来的にネストされたフォルダに対応する際は、ここを拡張
+        return getLayersInGroup(groupId)
+    }
+
+    /** 複数レイヤーのピクセル移動を確定（オフセットを実際のピクセルに適用） */
+    fun commitPixelMovement(ids: List<Int>) {
+        val doc = _document ?: return
+
+        for (id in ids) {
+            val layer = doc.layers.find { it.id == id } ?: continue
+            val offsetX = layer.offsetX.toInt()
+            val offsetY = layer.offsetY.toInt()
+
+            // オフセットをピクセルデータに適用
+            if (offsetX != 0 || offsetY != 0) {
+                translateLayerContent(id, offsetX, offsetY)
+            }
+
+            // オフセットをリセット
+            layer.offsetX = 0f
+            layer.offsetY = 0f
+        }
+
+        updateLayerState()
+    }
     fun translateLayerContent(id: Int, dx: Int, dy: Int) {
         _document?.translateLayerContent(id, dx, dy); updateUndoState()
     }
@@ -1314,13 +1455,15 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _document?.deleteLayerGroup(groupId); updateLayerState()
     }
     fun setLayerGroup(layerId: Int, groupId: Int) {
-        _document?.setLayerGroup(layerId, groupId); updateLayerState()
+        // groupId が負数（Flutter 側でのグループID表現）の場合は正数に変換
+        val actualGroupId = if (groupId < 0) -groupId else groupId
+        _document?.setLayerGroup(layerId, actualGroupId); updateLayerState()
     }
     fun setGroupVisibility(groupId: Int, visible: Boolean) {
-        _document?.setGroupVisibility(groupId, visible); updateUndoState()
+        _document?.setGroupVisibility(groupId, visible); updateLayerState()
     }
     fun setGroupOpacity(groupId: Int, opacity: Float) {
-        _document?.setGroupOpacity(groupId, opacity); updateUndoState()
+        _document?.setGroupOpacity(groupId, opacity); updateLayerState()
     }
 
     // ── フィルター ──────────────────────────────────────────────────
@@ -1457,43 +1600,82 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateLayerState() {
         val doc = _document ?: return
-        val uiLayers = mutableListOf<UiLayer>()
+        // 重い処理を Default ディスパッチャで非同期実行（メインスレッド非ブロック）
+        viewModelScope.launch(Dispatchers.Default) {
+            val startTime = System.currentTimeMillis()
+            val uiLayers = mutableListOf<UiLayer>()
 
-        // ── レイヤーグループをリストに含める ──
-        // groupId の昇順でグループを挿入
-        for ((gId, group) in doc.layerGroups.toSortedMap()) {
-            uiLayers.add(UiLayer(
-                id = -gId,  // グループは負の ID で区別
-                name = group.name,
-                opacity = 1f,
-                blendMode = 0,
-                isVisible = group.isVisible,
-                isLocked = false,
-                isClipToBelow = false,
-                isActive = false,
-                isGroup = true  // グループフラグをセット
-            ))
+            // ── レイヤーとグループを displayOrder で統一的にソート ──
+            data class DisplayItem(val displayOrder: Int, val uiLayer: UiLayer)
+            val displayItems = mutableListOf<DisplayItem>()
+
+            // グループを変換
+            for ((gId, group) in doc.layerGroups) {
+                displayItems.add(DisplayItem(
+                    displayOrder = group.displayOrder,
+                    uiLayer = UiLayer(
+                        id = -gId,  // グループは負の ID で区別
+                        name = group.name,
+                        opacity = 1f,
+                        blendMode = 0,
+                        isVisible = group.isVisible,
+                        isLocked = false,
+                        isClipToBelow = false,
+                        isActive = false,
+                        isGroup = true  // グループフラグをセット
+                    )
+                ))
+            }
+
+            // レイヤーを変換
+            for (layer in doc.layers) {
+                displayItems.add(DisplayItem(
+                    displayOrder = layer.displayOrder,
+                    uiLayer = UiLayer(
+                        id = layer.id,
+                        name = layer.name,
+                        opacity = layer.opacity,
+                        blendMode = layer.blendMode,
+                        isVisible = layer.isVisible,
+                        isLocked = layer.isLocked,
+                        isClipToBelow = layer.isClipToBelow,
+                        isActive = layer.id == doc.activeLayerId,
+                        isAlphaLocked = layer.isAlphaLocked,
+                        hasMask = layer.mask != null,
+                        isMaskEnabled = layer.isMaskEnabled,
+                        isEditingMask = layer.isEditingMask,
+                        groupId = layer.groupId,
+                        isTextLayer = layer.textConfig != null,
+                        isGroup = false
+                    )
+                ))
+            }
+
+            // displayOrder でソートして、UiLayer を抽出
+            uiLayers.addAll(displayItems.sortedBy { it.displayOrder }.map { it.uiLayer })
+
+            // 処理時間をログに出力
+            val elapsedTime = System.currentTimeMillis() - startTime
+            if (elapsedTime > 16) {  // フレーム時間（60fps = 16ms）超過時に警告
+                PaintDebug.d(PaintDebug.Perf) {
+                    "[updateLayerState] layers=${doc.layers.size} groups=${doc.layerGroups.size} time=${elapsedTime}ms"
+                }
+            }
+
+            // UI スレッドで結果を反映
+            withContext(Dispatchers.Main) {
+                _layers.value = uiLayers
+            }
         }
-
-        // ── 通常のレイヤーを追加 ──
-        uiLayers.addAll(doc.layers.map {
-            UiLayer(it.id, it.name, it.opacity, it.blendMode,
-                it.isVisible, it.isLocked, it.isClipToBelow, it.id == doc.activeLayerId,
-                it.isAlphaLocked,
-                hasMask = it.mask != null,
-                isMaskEnabled = it.isMaskEnabled,
-                isEditingMask = it.isEditingMask,
-                groupId = it.groupId,
-                isTextLayer = it.textConfig != null,
-                isGroup = false)
-        })
-
-        _layers.value = uiLayers
     }
 
     private fun updateUndoState() {
         val doc = _document ?: return
-        _canUndo.value = doc.canUndo; _canRedo.value = doc.canRedo
+        // Undo状態の更新もメインスレッド非ブロック
+        viewModelScope.launch(Dispatchers.Main) {
+            _canUndo.value = doc.canUndo
+            _canRedo.value = doc.canRedo
+        }
     }
 
     // ── 選択ツール ──────────────────────────────────────────────

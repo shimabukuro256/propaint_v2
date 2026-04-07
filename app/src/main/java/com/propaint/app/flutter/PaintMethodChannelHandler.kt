@@ -276,6 +276,18 @@ class PaintMethodChannelHandler(
                     ?: return result.error("INVALID_ARG", "ids is required", null)
                 launchHeavy(result) { viewModel.batchMergeLayers(ids) }
             }
+            "batchMoveLayersUp" -> {
+                @Suppress("UNCHECKED_CAST")
+                val ids = call.argument<List<Int>>("ids")
+                    ?: return result.error("INVALID_ARG", "ids is required", null)
+                launchHeavy(result) { viewModel.batchMoveLayersUp(ids) }
+            }
+            "batchMoveLayersDown" -> {
+                @Suppress("UNCHECKED_CAST")
+                val ids = call.argument<List<Int>>("ids")
+                    ?: return result.error("INVALID_ARG", "ids is required", null)
+                launchHeavy(result) { viewModel.batchMoveLayersDown(ids) }
+            }
 
             // ── レイヤーグループ ──
             "createLayerGroup" -> {
@@ -305,6 +317,38 @@ class PaintMethodChannelHandler(
                 val fromGroupId = call.argument<Int>("fromGroupId") ?: return result.error("INVALID_ARG", "fromGroupId is required", null)
                 val toGroupId = call.argument<Int>("toGroupId") ?: return result.error("INVALID_ARG", "toGroupId is required", null)
                 launchHeavy(result) { viewModel.reorderLayerGroup(fromGroupId, toGroupId) }
+            }
+            "reorderDisplayItem" -> {
+                val fromId = call.argument<Int>("fromId") ?: return result.error("INVALID_ARG", "fromId is required", null)
+                val toId = call.argument<Int>("toId") ?: return result.error("INVALID_ARG", "toId is required", null)
+                launchHeavy(result) { viewModel.reorderDisplayItem(fromId, toId) }
+            }
+
+            // ── ピクセル移動機能（将来実装向け対応） ──
+            "setLayersOffset" -> {
+                @Suppress("UNCHECKED_CAST")
+                val layerIds = call.argument<List<Int>>("layerIds") ?: return result.error("INVALID_ARG", "layerIds is required", null)
+                val offsetX = call.argument<Double>("offsetX")?.toFloat() ?: 0f
+                val offsetY = call.argument<Double>("offsetY")?.toFloat() ?: 0f
+                launchHeavy(result) { viewModel.setLayersOffset(layerIds, offsetX, offsetY) }
+            }
+            "resetLayersOffset" -> {
+                @Suppress("UNCHECKED_CAST")
+                val layerIds = call.argument<List<Int>>("layerIds") ?: return result.error("INVALID_ARG", "layerIds is required", null)
+                launchHeavy(result) { viewModel.resetLayersOffset(layerIds) }
+            }
+            "commitPixelMovement" -> {
+                @Suppress("UNCHECKED_CAST")
+                val layerIds = call.argument<List<Int>>("layerIds") ?: return result.error("INVALID_ARG", "layerIds is required", null)
+                launchHeavy(result) { viewModel.commitPixelMovement(layerIds) }
+            }
+            "getLayersInGroup" -> {
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                result.success(viewModel.getLayersInGroup(groupId))
+            }
+            "getLayersInGroupRecursive" -> {
+                val groupId = call.argument<Int>("groupId") ?: return result.error("INVALID_ARG", "groupId is required", null)
+                result.success(viewModel.getLayersInGroupRecursive(groupId))
             }
 
             // ── ツールモード ──
