@@ -33,6 +33,9 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   void initState() {
     super.initState();
     _brushSize = widget.state.brushSize.toInt();
+    // 初期選択モード：Add
+    _isAddMode = true;
+    widget.channel.setSelectionMode('Add');
     // initState では toolMode を変更しない（ツールバーが既に設定済み）
   }
 
@@ -105,7 +108,11 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: () => setState(() => _isAddMode = isAdd),
+          onTap: () {
+            setState(() => _isAddMode = isAdd);
+            final mode = isAdd ? 'Add' : 'Subtract';
+            widget.channel.setSelectionMode(mode);
+          },
           borderRadius: BorderRadius.circular(8),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),

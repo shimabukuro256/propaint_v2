@@ -323,6 +323,117 @@ class SelectionManager(val width: Int, val height: Int) {
         PaintDebug.d(PaintDebug.Layer) { "[Selection] expandContract amount=$amount" }
     }
 
+    /**
+     * マグネット選択: エッジ吸着。
+     * 開始点から周辺のエッジを自動トレース。
+     * @param surface スタートエッジ検出用サーフェス
+     * @param startX 開始点 X
+     * @param startY 開始点 Y
+     * @param tolerance エッジ検出の許容値（コントラスト）
+     * @param maxDistance 追跡距離限界（ピクセル）
+     * @param mode 追加/削除モード
+     */
+    fun selectMagnet(
+        surface: TiledSurface,
+        startX: Int, startY: Int,
+        tolerance: Int = 32,
+        maxDistance: Int = 256,
+        mode: SelectionMode = SelectionMode.Replace
+    ) {
+        if (startX < 0 || startX >= width || startY < 0 || startY >= height) return
+        val tol = tolerance.coerceIn(1, 255)
+        val maxDist = maxDistance.coerceIn(10, 1024)
+
+        // エッジ検出: Sobel フィルタで勾配計算
+        val edges = computeEdges(surface, tol)
+
+        // アクティブな磁石ポイントを中心から開始
+        val m = prepareMask(mode)
+        val visited = BooleanArray(width * height)
+        val queue = ArrayDeque<Int>(1024)
+
+        val startIdx = startY * width + startX
+        if (edges[startIdx] > 0) {
+            queue.add(startIdx)
+            visited[startIdx] = true
+            applyMaskPixel(m, startIdx, 255, mode)
+        }
+
+        // BFS でエッジに沿ってトレース
+        var distTracked = 0
+        while (queue.isNotEmpty() && distTracked < maxDist) {
+            val idx = queue.removeFirst()
+            val x = idx % width; val y = idx / width
+
+            // 4方向隣接を探索
+            val neighbors = listOf(
+                if (x > 0) idx - 1 else -1,
+                if (x < width - 1) idx + 1 else -1,
+                if (y > 0) idx - width else -1,
+                if (y < height - 1) idx + width else -1
+            ).filter { it >= 0 }
+
+            for (nIdx in neighbors) {
+                if (!visited[nIdx] && edges[nIdx] > 0) {
+                    visited[nIdx] = true
+                    queue.add(nIdx)
+                    applyMaskPixel(m, nIdx, 255, mode)
+                    distTracked++
+                }
+            }
+        }
+
+        _mask = m
+        _boundsCacheDirty = true
+        PaintDebug.d(PaintDebug.Layer) { "[Selection] selectMagnet ($startX,$startY) tol=$tol" }
+    }
+
+    /** Sobel エッジ検出 */
+    private fun computeEdges(surface: TiledSurface, tolerance: Int): IntArray {
+        val edges = IntArray(width * height)
+
+        for (y in 1 until height - 1) {
+            for (x in 1 until width - 1) {
+                // Sobel オペレータ
+                val off = y * width + x
+                val p00 = surface.getPixelAt(x - 1, y - 1)
+                val p10 = surface.getPixelAt(x, y - 1)
+                val p20 = surface.getPixelAt(x + 1, y - 1)
+                val p01 = surface.getPixelAt(x - 1, y)
+                val p21 = surface.getPixelAt(x + 1, y)
+                val p02 = surface.getPixelAt(x - 1, y + 1)
+                val p12 = surface.getPixelAt(x, y + 1)
+                val p22 = surface.getPixelAt(x + 1, y + 1)
+
+                // グレースケール変換（luminance）
+                val g00 = pixelToGray(p00)
+                val g10 = pixelToGray(p10)
+                val g20 = pixelToGray(p20)
+                val g01 = pixelToGray(p01)
+                val g21 = pixelToGray(p21)
+                val g02 = pixelToGray(p02)
+                val g12 = pixelToGray(p12)
+                val g22 = pixelToGray(p22)
+
+                // Sobel X, Y
+                val gx = (-g00 - 2*g01 - g02) + (g20 + 2*g21 + g22)
+                val gy = (-g00 - 2*g10 - g20) + (g02 + 2*g12 + g22)
+
+                // 勾配の大きさ
+                val magnitude = sqrt((gx * gx + gy * gy).toFloat()).toInt()
+                edges[off] = if (magnitude > tolerance) 255 else 0
+            }
+        }
+        return edges
+    }
+
+    private fun pixelToGray(pixel: Int): Int {
+        val r = PixelOps.red(pixel)
+        val g = PixelOps.green(pixel)
+        val b = PixelOps.blue(pixel)
+        return (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+    }
+
     /** 選択範囲をぼかす (ガウシアンブラー近似: 3パスボックスブラー) */
     fun feather(radius: Int) {
         val m = _mask ?: return

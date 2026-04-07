@@ -828,6 +828,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun onTouchEvent(event: MotionEvent): Boolean {
         val doc = _document ?: return false
 
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            PaintDebug.d(PaintDebug.Input) { "[Touch] ACTION_DOWN at (${event.x}, ${event.y}), toolMode=${_toolMode.value.name}" }
+        }
+
         // 慣性アニメーション中に新しいタッチが来たらキャンセル
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             inertiaJob?.cancel()
@@ -866,7 +870,16 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
         // マグネット選択 (SelectMagnet): タップでアンカーポイント設定、エッジ自動追跡
         if (_toolMode.value == ToolMode.SelectMagnet) {
-            val surface = doc.getActiveLayer()?.content ?: return true
+            val activeLayer = doc.getActiveLayer()
+            if (activeLayer == null) {
+                PaintDebug.d(PaintDebug.Input) { "[Magnet] no active layer" }
+                return true
+            }
+            val surface = activeLayer.content
+            if (surface == null) {
+                PaintDebug.d(PaintDebug.Input) { "[Magnet] active layer has no surface" }
+                return true
+            }
 
             when (event.actionMasked) {
                 MotionEvent.ACTION_UP -> {
@@ -1832,6 +1845,14 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         pushSelMaskToRenderer()
     }
 
+    fun selectMagnet(x: Int, y: Int, tolerance: Int = 32, maxDistance: Int = 256) {
+        val doc = _document ?: return
+        val layer = doc.getActiveLayer() ?: return
+        doc.selectionManager.selectMagnet(layer.content, x, y, tolerance, maxDistance, _selectionMode.value)
+        _hasSelection.value = doc.selectionManager.hasSelection
+        pushSelMaskToRenderer()
+    }
+
     fun invertSelection() {
         val doc = _document ?: return
         doc.selectionManager.invertSelection()
@@ -2002,7 +2023,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── 図形・塗りつぶし ────────────────────────────────────────
 
-    fun setToolMode(mode: ToolMode) { _toolMode.value = mode }
+    fun setToolMode(mode: ToolMode) {
+        _toolMode.value = mode
+        PaintDebug.d(PaintDebug.Input) { "[Tool] mode changed to ${mode.name}" }
+    }
 
     fun drawShape(shapeType: String, left: Int, top: Int, right: Int, bottom: Int, fill: Boolean, thickness: Float = 1f) {
         val doc = _document ?: return

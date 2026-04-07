@@ -443,6 +443,14 @@ class PaintMethodChannelHandler(
                 val amount = call.argument<Int>("amount") ?: 5
                 viewModel.expandSelection(amount); result.success(null)
             }
+            "selectMagnet" -> {
+                val x = call.argument<Int>("x") ?: return result.error("INVALID", "x required", null)
+                val y = call.argument<Int>("y") ?: return result.error("INVALID", "y required", null)
+                val tolerance = call.argument<Int>("tolerance") ?: 32
+                val maxDistance = call.argument<Int>("maxDistance") ?: 256
+                viewModel.selectMagnet(x, y, tolerance, maxDistance)
+                result.success(null)
+            }
             "cancelMagnetSelection" -> {
                 viewModel.cancelMagnetSelection(); result.success(null)
             }
@@ -567,10 +575,22 @@ class PaintMethodChannelHandler(
             "setToolMode" -> {
                 val mode = call.argument<String>("mode") ?: "Draw"
                 try {
+                    PaintDebug.d(PaintDebug.Input) { "[MethodChannel] setToolMode: $mode" }
                     viewModel.setToolMode(com.propaint.app.viewmodel.ToolMode.valueOf(mode))
                     result.success(null)
                 } catch (e: IllegalArgumentException) {
+                    PaintDebug.d(PaintDebug.Input) { "[MethodChannel] setToolMode error: $mode - ${e.message}" }
                     result.error("INVALID_ARG", "unknown tool mode: $mode", null)
+                }
+            }
+            "setSelectionMode" -> {
+                val modeStr = call.argument<String>("mode") ?: "Replace"
+                try {
+                    val mode = com.propaint.app.engine.SelectionMode.valueOf(modeStr)
+                    viewModel.setSelectionMode(mode)
+                    result.success(null)
+                } catch (e: IllegalArgumentException) {
+                    result.error("INVALID_ARG", "unknown selection mode: $modeStr", null)
                 }
             }
 

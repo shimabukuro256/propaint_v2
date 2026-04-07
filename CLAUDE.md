@@ -2,9 +2,10 @@
 
 ## プロジェクト概要
 
-Android ペイントアプリ。Kotlin + Jetpack Compose + OpenGL ES 2.0。
+Android ペイントアプリ。**Kotlin (Kotlin/Android) + Dart (Flutter)** の組み合わせ。
+開発環境：**Android Studio**（Kotlin エンジン）+ **Flutter SDK**（UI フロントエンド）。
 描画エンジンは Drawpile 準拠の CPU タイルベース (64x64 premultiplied ARGB_8888)。
-UI は Flutter (メイン) + Compose (ギャラリー)。
+UI は **Flutter (メイン UI)** で実装。
 
 ### ディレクトリ構成
 
@@ -171,8 +172,13 @@ CLI Claude はプロジェクト全体のコンテキストを持つため、
 1. **ログ解析** — logcat が提供されたら下記「デバッグログ解析」の手順で根本原因を特定
 2. **関連コード読解** — 原因箇所のコードを読んでバグパターンと照合
 3. **修正** — コードを修正（防御的アサーション + 構造化ログを含む）
-4. **ビルド確認** — `./gradlew :app:compileDebugKotlin --no-daemon` でビルドが通ることを確認
+4. **ビルド確認** — `./gradlew :app:compileDebugKotlin --no-daemon` でビルドが通ることを確認（Android Studio のコンソール出力でも確認可）
 5. **結果報告** — 修正内容を簡潔に報告
+
+### 開発環境での動作確認
+
+- **Kotlin コード修正**: Android Studio で `Build > Make Module 'app'` または `Ctrl+Shift+F9` でコンパイル確認
+- **Flutter UI 修正**: `flutter run` コマンド、または Android Studio の Run ボタンで実機/エミュレータに展開
 
 ---
 
@@ -182,7 +188,7 @@ CLI Claude はプロジェクト全体のコンテキストを持つため、
 
 ### 手順
 
-1. **ビルド確認** — `./gradlew :app:compileDebugKotlin --no-daemon` でビルドが通ることを確認
+1. **ビルド確認** — `./gradlew :app:compileDebugKotlin --no-daemon` でビルドが通ることを確認（Android Studio のコンパイラでも可）
 2. **変更確認** — `git status` と `git diff` で変更内容を確認
 3. **ステージング** — 関連ファイルを `git add` (機密ファイル・ローカル設定を含めないこと)
 4. **コミット** — 変更内容を反映した日本語コミットメッセージで `git commit`
@@ -191,7 +197,9 @@ CLI Claude はプロジェクト全体のコンテキストを持つため、
 ### 除外ファイル（絶対に push しない）
 
 - `.claude/` — ローカル設定・トークン含む（.gitignore 済み）
+- `.idea/` — Android Studio プロジェクト設定（.gitignore 済み）
 - `local.properties` — ANDROID_SDK パス等
+- `*.iml` — Android Studio モジュール設定
 - `implementation_plan.md` — 一時的な作業メモ
 
 ---

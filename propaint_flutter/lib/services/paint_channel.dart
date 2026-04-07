@@ -224,6 +224,10 @@ class PaintChannel {
   Future<void> setToolMode(String mode) =>
       _method.invokeMethod('setToolMode', {'mode': mode});
 
+  /// 選択モード設定 (Replace, Add, Subtract, Intersect)
+  Future<void> setSelectionMode(String mode) =>
+      _method.invokeMethod('setSelectionMode', {'mode': mode});
+
   // ─── 選択ツール ───────────────────────────────────────
 
   Future<void> selectRect(int left, int top, int right, int bottom) =>
@@ -234,6 +238,13 @@ class PaintChannel {
 
   Future<void> selectByColor(int x, int y, {int tolerance = 32, bool contiguous = true}) =>
       _method.invokeMethod('selectByColor', {'x': x, 'y': y, 'tolerance': tolerance, 'contiguous': contiguous});
+
+  /// マグネット選択: エッジ吸着で自動トレース
+  /// @param x, y: スタート座標
+  /// @param tolerance: エッジ検出の許容値
+  /// @param maxDistance: トレース距離限界
+  Future<void> selectMagnet(int x, int y, {int tolerance = 32, int maxDistance = 256}) =>
+      _method.invokeMethod('selectMagnet', {'x': x, 'y': y, 'tolerance': tolerance, 'maxDistance': maxDistance});
 
   Future<void> selectAll() => _method.invokeMethod('selectAll');
   Future<void> clearSelection() => _method.invokeMethod('clearSelection');
