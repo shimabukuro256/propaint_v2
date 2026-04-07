@@ -181,13 +181,6 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
     );
   }
 
-  void _onFeather() {
-    widget.channel.featherSelection(5);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('選択範囲をぼかしました')),
-    );
-  }
-
   void _onDelete() {
     widget.channel.deleteSelection();
     ScaffoldMessenger.of(context).showSnackBar(
@@ -227,7 +220,8 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   Widget build(BuildContext context) {
     final isPenMode = widget.state.toolMode == 'SelectPen';
     final isMagnetMode = widget.state.toolMode == 'SelectMagnet';
-    final showModeButtons = isPenMode;
+    final isMagicWandMode = widget.state.toolMode == 'SelectMagicWand';
+    final showModeButtons = isPenMode || isMagnetMode || isMagicWandMode;
     final hasSelection = widget.state.hasSelection;
 
     return Container(
@@ -289,7 +283,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
           ),
           const SizedBox(height: 12),
 
-          // ──────── 選択モード（ペン/なげなわのみ） ────────
+          // ──────── 選択モード（ペン/マグネット/自動選択） ────────
           if (showModeButtons) ...[
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -403,12 +397,6 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildActionButton(
-                    icon: Icons.blur_on,
-                    label: 'Feather',
-                    onPressed: _onFeather,
-                  ),
-                  const SizedBox(width: 4),
                   _buildActionButton(
                     icon: Icons.delete_sweep,
                     label: 'Delete',
