@@ -1925,6 +1925,27 @@ class CanvasDocument(val width: Int, val height: Int) {
         return mask.copyOf()
     }
 
+    /**
+     * 選択範囲がない場合、レイヤーの描画済みピクセルのバウンディングボックスから
+     * 矩形選択マスクを自動生成する（フォールバック）。
+     * 描画コンテンツが空の場合は null を返す。
+     */
+    fun getSelectionMaskWithAutoFallback(layer: Layer): ByteArray? {
+        // 既存の選択範囲がある場合はそれを使用
+        if (selectionManager.hasSelection) {
+            return selectionManager.mask?.copyOf()
+        }
+        // 自動選択: 描画済みピクセルのバウンディングボックスを矩形選択
+        val bounds = layer.content.getContentBounds() ?: return null
+        PaintDebug.d(PaintDebug.Layer) {
+            "[AutoSelect] layer=${layer.id} bounds=[${bounds[0]},${bounds[1]},${bounds[2]},${bounds[3]}]"
+        }
+        return SelectionManager.createRectangleMask(
+            bounds[0], bounds[1], bounds[2], bounds[3],
+            width, height
+        )
+    }
+
     // ── 複数レイヤー一括変形 ──────────────────────────────────────
 
     /**

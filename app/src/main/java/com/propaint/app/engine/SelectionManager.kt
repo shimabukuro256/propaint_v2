@@ -544,6 +544,36 @@ class SelectionManager(val width: Int, val height: Int) {
             }
         }
     }
+
+    companion object {
+        /**
+         * 矩形選択マスクを生成（自動選択フォールバック用）。
+         * @param left 左端 X (inclusive)
+         * @param top 上端 Y (inclusive)
+         * @param right 右端 X (exclusive)
+         * @param bottom 下端 Y (exclusive)
+         * @param canvasWidth キャンバス幅
+         * @param canvasHeight キャンバス高さ
+         * @return 矩形範囲内が 255、外が 0 の ByteArray
+         */
+        fun createRectangleMask(
+            left: Int, top: Int, right: Int, bottom: Int,
+            canvasWidth: Int, canvasHeight: Int,
+        ): ByteArray {
+            require(canvasWidth > 0 && canvasHeight > 0) { "canvas size must be > 0" }
+            val mask = ByteArray(canvasWidth * canvasHeight)
+            val l = left.coerceIn(0, canvasWidth)
+            val t = top.coerceIn(0, canvasHeight)
+            val r = right.coerceIn(0, canvasWidth)
+            val b = bottom.coerceIn(0, canvasHeight)
+            for (y in t until b) {
+                for (x in l until r) {
+                    mask[y * canvasWidth + x] = 0xFF.toByte()
+                }
+            }
+            return mask
+        }
+    }
 }
 
 /** 選択モード */
