@@ -408,3 +408,886 @@ logcat やデバッグログが提供された場合の解析手順:
 6. `EGL` / `GLError` / `GL_INVALID` を検索
 
 検出結果はバグパターン ID（BUG-xxxx）で紐付けて報告すること。
+
+---
+
+## 複数選択レイヤー×選択範囲による一括編集・変形機能
+
+複数のレイヤーを同時選択し、選択範囲内で統一した編集・変形を適用する機能。
+Photoshop/CLIP STUDIO PAINT など業務用ツールでの標準機能。
+
+### 機能概要
+
+**ユースケース:**
+- 複数レイヤーを同時選択 → 選択範囲内で **スケール/回転/スキュー** を一括適用
+- 複数レイヤーの選択範囲内のみ **移動**
+- 複数レイヤーの選択範囲内のみ **色調補正**（将来）
+- グループ内の全レイヤーを選択 → グループ全体を選択範囲内で変形
+
+**有効条件:**
+- `multipleLayersSelected` が true （2個以上のレイヤーが選択状態）
+- `hasSelection` が true （選択範囲が存在）
+- TransformTool / MoveTool / AdjustmentTool をアクティブ
+
+**スコープ（Phase 1）:**
+- スケール・回転・スキュー（Transform操作）
+- 移動（Move操作）
+- クリップ：選択範囲外のピクセルは処理対象外
+
+### アーキテクチャ設計
+
+#### Kotlin側（CanvasDocument）
+
+**新データ構造:**
+```kotlin
+// 複数選択レイヤーの管理
+data class MultiLayerSelection(
+    val layerIds: List<Int>,  // 選択中のレイヤーID（昇順）
+    val bounds: Rect,         // 全レイヤーの合成バウンディングボックス
+    val timestamp: Long       // 選択時刻（Undo用）
+)
+
+// 一括変形操作
+sealed class MultiLayerTransformOp {
+    data class Scale(val sx: Float, val sy: Float, val cx: Float, val cy: Float) : MultiLayerTransformOp()
+    data class Rotate(val angle: Float, val cx: Float, val cy: Float) : MultiLayerTransformOp()
+    data class Skew(val sx: Float, val sy: Float) : MultiLayerTransformOp()
+    data class Move(val dx: Float, val dy: Float) : MultiLayerTransformOp()
+}
+```
+
+**新メソッド:**
+```kotlin
+// CanvasDocument.kt に追加
+
+fun getMultipleLayerSelection(): List<Int>
+    // 現在選択中のレイヤーID一覧を返す（複数選択未実装なら空リスト）
+
+fun applyMultiLayerTransform(
+    layerIds: List<Int>,
+    op: MultiLayerTransformOp,
+    selectionMask: ByteArray?  // null = 全範囲、非nullの場合はマスク内のみ
+): Boolean
+    // 複数レイヤーに統一の変形を適用
+    // 各レイヤーに対して:
+    //   1. selectionMask が有効な場合、変形範囲をマスク外はクリップ
+    //   2. 逆行列計算で元画像座標に変換
+    //   3. バイリニア補間でサンプリング
+    //   4. 変形後のピクセルに selectionMask の値を α値として乗算
+    // 戻り値: 成功時 true
+    // エラー: layerIds が空 / 逆行列計算失敗 → false + ログ出力
+
+fun applyMultiLayerMove(
+    layerIds: List<Int>,
+    dx: Float, dy: Float,
+    selectionMask: ByteArray?
+): Boolean
+    // 複数レイヤーを同時移動
+    // selectionMask が有効な場合、マスク外のピクセルは非表示状態に
+    // ※ 本来は画像データ上は移動しないが、maskOffset を適用
+```
+
+**実装上の注意:**
+- 座標変換：各レイヤー独立の変形行列（共通の中心座標で統一計算）
+- マスク適用：タイルごとのマスク判定で CPU 効率化
+- Undo対応：各レイヤーのスナップショット取得（COW で効率化）
+- スレッド安全性：ReentrantLock で全体をロック
+
+#### Flutter側（paint_state.dart / layer_panel.dart）
+
+**状態管理:**
+```dart
+// PaintState に追加
+class PaintState {
+  final Set<int> selectedLayerIds;      // 複数選択中のレイヤーID
+  final bool multipleLayersSelected;    // 複数選択の有無
+  
+  bool canTransformSelection() =>
+      multipleLayersSelected && hasSelection;  // 変形操作が有効か
+}
+```
+
+**UIロジック（layer_panel.dart）:**
+```dart
+// 複数選択の実装
+GestureDetector(
+  onTap: (details) {
+    if (details.isCtrlKey || details.isShiftKey) {
+      // Ctrl: Toggle / Shift: Range select
+      if (isCtrlKey) {
+        paintState.toggleLayerSelection(layerId);
+      } else {
+        paintState.selectLayersInRange(lastSelectedId, layerId);
+      }
+    } else {
+      // 通常: 単一選択
+      paintState.clearSelection();
+      paintState.selectLayer(layerId);
+    }
+  },
+  child: Container(
+    color: selectedLayerIds.contains(layerId)
+        ? Colors.blue.withOpacity(0.3)  // 複数選択時は水色ハイライト
+        : Colors.transparent,
+    child: LayerCell(...)
+  )
+)
+```
+
+**TransformTool への連携:**
+```dart
+// transform_tool.dart (将来実装)
+
+void applyTransformToSelection(MultiLayerTransformOp op) {
+  if (!paintState.canTransformSelection()) return;
+  
+  final layerIds = paintState.selectedLayerIds.toList();
+  channel.invokeMethod('applyMultiLayerTransform', {
+    'layerIds': layerIds,
+    'operation': _serializeOp(op),
+    'selectionMaskBase64': _encodeSelectionMask(paintState.selectionMask),
+  });
+}
+```
+
+### 実装計画
+
+#### **Phase 0: ID変換バグ修正（優先度：最高）**
+- ファイル: PaintViewModel.kt:1602-1615
+- 内容: レイヤーグループID変換修正
+- 見積もり: 30分
+
+#### **Phase 1: 複数選択UI実装（優先度：高）**
+
+**1-1. 複数選択状態管理（2時間）**
+- PaintState に `selectedLayerIds: Set<int>` 追加
+- `toggleLayerSelection()`, `selectLayersInRange()` メソッド実装
+- EventChannel で Kotlin 側と同期
+
+**1-2. 複数選択UIビジュアル（2時間）**
+- layer_panel.dart でハイライト表示
+- Shift / Ctrl キー検出ロジック
+- 複数選択時のドラッグ操作（並び替え）の無効化
+
+**1-3. Kotlin側の複数選択管理（1時間）**
+- PaintViewModel に `multipleLayerSelection: MultiLayerSelection` 追加
+- EventChannel で Flutter に状態を送信
+
+#### **Phase 2: 一括削除・一括プロパティ変更（優先度：高）**
+
+**2-1. 一括削除（1時間）**
+- `deleteMultipleLayers(layerIds: List<Int>)` MethodChannel メソッド
+
+**2-2. 一括プロパティ変更（2時間）**
+- `setMultipleLayersOpacity(layerIds, opacity)`
+- `setMultipleLayersBlendMode(layerIds, blendMode)`
+- `setMultipleLayersVisibility(layerIds, visible)`
+
+**2-3. 一括移動（フォルダ内）（1時間）**
+- `moveMultipleLayersToGroup(layerIds, groupId)`
+
+#### **Phase 3: 選択範囲×複数レイヤー変形（優先度：高）**
+
+**3-1. 変形オペレーション定義（1時間）**
+- Kotlin: `MultiLayerTransformOp` sealed class 定義
+- Flutter ↔ Kotlin: serialization ロジック
+
+**3-2. Kotlin側変形実装（4-5時間）**
+```kotlin
+// CanvasDocument.kt
+
+fun applyMultiLayerTransform(
+    layerIds: List<Int>,
+    op: MultiLayerTransformOp,
+    selectionMask: ByteArray?
+): Boolean {
+    require(layerIds.isNotEmpty()) { "layerIds must not be empty" }
+    
+    val layers = layerIds.mapNotNull { id -> getLayerById(id) }
+    if (layers.size != layerIds.size) {
+        Log.e(TAG, "[Layer] some layers not found: requested=${layerIds.size}, found=${layers.size}")
+        return false
+    }
+    
+    // スナップショット取得（Undo用）
+    val snapshots = layers.associate { it.id to it.takeSnapshot() }
+    
+    try {
+        for (layer in layers) {
+            when (op) {
+                is Scale -> {
+                    transformLayerScale(layer, op.sx, op.sy, op.cx, op.cy, selectionMask)
+                }
+                is Rotate -> {
+                    transformLayerRotate(layer, op.angle, op.cx, op.cy, selectionMask)
+                }
+                // ... 他のオペレーション
+            }
+            // タイルをダーティマーク
+            layer.surface.markAllTilesDirty()
+        }
+        
+        // Undo スタックに追加
+        pushUndoSnapshot(
+            UndoSnapshot.MultiLayerTransform(
+                layerIds = layerIds,
+                before = snapshots,
+                op = op
+            )
+        )
+        
+        updateLayerState()
+        return true
+    } catch (e: Exception) {
+        Log.e(TAG, "[Layer] multiLayerTransform failed: ${e.message}", e)
+        // ロールバック
+        layers.zip(snapshots.values).forEach { (layer, snapshot) ->
+            layer.restoreSnapshot(snapshot)
+        }
+        return false
+    }
+}
+
+private fun transformLayerScale(
+    layer: Layer,
+    sx: Float, sy: Float,
+    cx: Float, cy: Float,
+    selectionMask: ByteArray?
+) {
+    require(sx > 0 && sy > 0) { "scale factors must be > 0" }
+    
+    val surface = layer.surface
+    val width = surface.width
+    val height = surface.height
+    val tiledSurface = surface as TiledSurface
+    
+    // 逆行列計算（元画像座標へ）
+    val invSx = 1f / sx
+    val invSy = 1f / sy
+    
+    val tempPixels = IntArray(Tile.SIZE * Tile.SIZE)
+    
+    for (ty in tiledSurface.tileRange) {
+        for (tx in tiledSurface.tileRange) {
+            val tile = tiledSurface.getTile(tx, ty) ?: continue
+            
+            for (ly in 0 until Tile.SIZE) {
+                for (lx in 0 until Tile.SIZE) {
+                    val px = tx * Tile.SIZE + lx
+                    val py = ty * Tile.SIZE + ly
+                    
+                    // 選択範囲チェック
+                    if (selectionMask != null) {
+                        val maskIdx = py * width + px
+                        if (maskIdx < 0 || maskIdx >= selectionMask.size) continue
+                        if ((selectionMask[maskIdx].toInt() and 0xFF) == 0) {
+                            tempPixels[ly * Tile.SIZE + lx] = 0
+                            continue
+                        }
+                    }
+                    
+                    // 逆変換で元座標を計算
+                    val srcX = (px - cx) * invSx + cx
+                    val srcY = (py - cy) * invSy + cy
+                    
+                    // バイリニア補間でサンプリング
+                    val color = sampleBilinear(surface, srcX, srcY)
+                    
+                    // 選択範囲がある場合、アルファに乗算
+                    if (selectionMask != null) {
+                        val maskValue = (selectionMask[py * width + px].toInt() and 0xFF).toFloat() / 255f
+                        tempPixels[ly * Tile.SIZE + lx] = multiplyAlpha(color, maskValue)
+                    } else {
+                        tempPixels[ly * Tile.SIZE + lx] = color
+                    }
+                }
+            }
+            
+            // タイルを更新
+            tile.setPixels(tempPixels)
+        }
+    }
+}
+
+private fun sampleBilinear(surface: TiledSurface, x: Float, y: Float): Int {
+    // バウンダリーチェック
+    if (x < 0 || x >= surface.width || y < 0 || y >= surface.height) return 0
+    
+    val x0 = x.toInt()
+    val y0 = y.toInt()
+    val x1 = minOf(x0 + 1, surface.width - 1)
+    val y1 = minOf(y0 + 1, surface.height - 1)
+    
+    val fx = x - x0
+    val fy = y - y0
+    
+    val c00 = surface.getPixelAt(x0, y0)
+    val c10 = surface.getPixelAt(x1, y0)
+    val c01 = surface.getPixelAt(x0, y1)
+    val c11 = surface.getPixelAt(x1, y1)
+    
+    // ARGB をフロート分解 → 補間 → 再合成
+    val result = IntArray(4)
+    for (ch in 0..3) {
+        val v00 = (c00 shr (ch * 8)) and 0xFF
+        val v10 = (c10 shr (ch * 8)) and 0xFF
+        val v01 = (c01 shr (ch * 8)) and 0xFF
+        val v11 = (c11 shr (ch * 8)) and 0xFF
+        
+        val v0 = (v00 * (1 - fx) + v10 * fx).toInt()
+        val v1 = (v01 * (1 - fx) + v11 * fx).toInt()
+        result[ch] = (v0 * (1 - fy) + v1 * fy).toInt() and 0xFF
+    }
+    
+    return (result[3] shl 24) or (result[0] shl 16) or (result[1] shl 8) or result[2]
+}
+```
+
+**3-3. Flutter側UI（TransformTool）（3-4時間）**
+- ドラッグで変形操作を入力
+- リアルタイムプレビュー
+- 確定 / キャンセルボタン
+- MethodChannel で Kotlin に送信
+
+#### **Phase 4: 移動操作の選択範囲クリップ対応（優先度：中）**
+
+**4-1. MoveTool の修正（2時間）**
+- 複数選択 + 選択範囲の組み合わせ時、マスク外のピクセルを隠す
+
+#### **Phase 5: グループ×複数選択×選択範囲（優先度：低・将来）**
+
+**5-1. グループ内全レイヤーの自動選択（1時間）**
+- フォルダをCtrl+Click → 配下の全レイヤーを複数選択
+
+**5-2. リンク機能（1週間以上・別タスク）**
+- 複数選択レイヤーを「リンク」状態に設定
+- リンク済みレイヤーへの操作を全て同期
+
+### 座標変換・マスク処理の詳細
+
+#### **変形行列の統一**
+
+全レイヤーで **共通の中心座標 (cx, cy)** を使用：
+```
+中心座標 = (複数選択レイヤーの合成BoundingBox の中心)
+         = ((minX + maxX) / 2, (minY + maxY) / 2)
+```
+
+効果：複数レイヤーが「一体化して回転・スケール」される（Photoshop と同じ動作）
+
+#### **選択範囲マスクの適用**
+
+```
+最終ピクセル色 = 変形後の色 × (selectionMask / 255)
+```
+
+つまり：
+- マスク値 255（完全選択）→ 変形色がそのまま表示
+- マスク値 128（半選択）→ 変形色と元色の 50:50 ブレンド
+- マスク値 0（非選択）→ 元色が保持（変形されない）
+
+#### **パフォーマンス最適化**
+
+- **タイル単位の処理**: タイルが完全に非選択域なら処理スキップ
+- **COW (Copy-on-Write)**: スナップショット取得は参照のみ、変更時にコピー
+- **バイリニア補間**: float 演算は ホットパスで inline 化
+- **Dispatcher.Default**: 複数レイヤーの変形を並列化可能（将来）
+
+### 既知の課題・制約
+
+1. **ビルドモード未考慮**
+   - 複数レイヤーが異なるブレンドモード → 変形時は全て Normal で処理
+   - 本来は元のブレンドモードを保持したまま変形すべき（高難度）
+
+2. **テクスチャ境界での補間**
+   - タイル境界で バイリニア補間が隣接タイルを参照 → 性能低下の可能性
+   - 最適化は後回し
+
+3. **選択範囲のアンチエイリアシング未対応**
+   - 変形後の選択範囲エッジが「ギザギザ」になる可能性
+   - 高品質が必要な場合は FXAA などを後処理
+
+4. **メモリ使用量**
+   - 複数レイヤー選択時のスナップショットで メモリ倍増
+   - 50 レイヤー × 2K×2K = 数百 MB → OOM リスク
+   - 将来: 差分スナップショット導入で圧縮
+
+### チェックリスト（実装開始前に確認）
+
+- [x] Phase 0: ID変換バグ修正完了 ✅ 2026-04-07
+- [ ] Kotlin側の `MultiLayerTransformOp` sealed class 定義済み
+- [ ] Flutter側の `selectedLayerIds: Set<int>` 状態管理実装済み
+- [ ] MethodChannel メソッドの引数・戻り値を明示書か
+- [ ] 逆行列計算の determinant check 実装
+- [ ] selectionMask null チェック完全
+- [ ] Undo/Redo データモデル更新
+- [ ] UI/UX：複数選択時の視覚フィードバック
+- [ ] ビルド確認: `./gradlew :app:compileDebugKotlin --no-daemon` 成功
+- [ ] 実機テスト：複数選択 → 変形 → Undo 一連の動作確認
+
+---
+
+## 選択範囲内ピクセルの浮遊選択層（Floating Selection）機能
+
+選択範囲で指定したピクセル領域を「浮遊選択層」として独立させ、**8ハンドル付きバウンディングボックス** で移動・リサイズできる機能。
+Photoshop、CLIP STUDIO PAINT の「浮遊レイヤー」、Microsoft Excel の画像リサイズ操作と同等。
+
+### 機能概要
+
+**UI/UX：**
+- 選択範囲を作成 → 選択範囲内のピクセルが「浮遊選択層」として確保
+- バウンディングボックスが表示：8個のハンドル（角4 + 辺中央4）
+  - **角ハンドル**: ドラッグで 縦横同時スケール（宽高比保持 or 自由）
+  - **辺ハンドル**: ドラッグで 単軸スケール（水平 / 垂直）
+  - **背景領域**: ドラッグで 移動
+- **確定操作**: Enter キー / 外部タップで元レイヤーに統合
+- **キャンセル操作**: Escape キーで浮遊選択層を破棄
+
+**技術的特性：**
+- 浮遊選択層は **新規レイヤーグループ** として CanvasDocument に追加（一時的）
+- 変形処理は Phase 3 の `applyMultiLayerTransform()` と共通化
+- Undo/Redo 対応：確定時にスナップショット
+- 複数選択レイヤー × 選択範囲の組み合わせで、複数レイヤーの浮遊も可能
+
+### ユースケース
+
+1. **選択範囲内のピクセル移動**
+   - 一部の描画内容だけを別の位置に移動
+   - 例：顔だけ右に 30px スライド
+
+2. **スケール・回転による変形**
+   - 選択範囲内の描画を拡大・回転
+   - 例：選択範囲内のオブジェクトを 2倍にスケール
+
+3. **複数レイヤーの同時変形**
+   - 複数選択 + 選択範囲内で、全レイヤーを統一変形
+
+4. **マスク風の効果**
+   - 選択範囲のみを移動・リサイズすることで、マスク境界を動的に調整
+
+### アーキテクチャ設計
+
+#### Kotlin側（CanvasDocument）
+
+**浮遊選択層の管理：**
+```kotlin
+// CanvasDocument.kt に追加
+
+data class FloatingSelection(
+    val id: Int,                    // 浮遊選択層ID（負数で管理: -1, -2...）
+    val sourceLayerIds: List<Int>,  // 元のレイヤーID（複数可）
+    val selectionBounds: Rect,      // 選択範囲のバウンディングボックス
+    val originalPixels: Map<Int, IntArray>,  // 元のピクセルデータ（COW）
+    val currentBounds: Rect,        // 現在の変形後バウンディングボックス
+    val transformMatrix: Matrix4x4, // スケール・回転の変形行列
+    val createdAt: Long,            // 作成時刻
+    var isConfirmed: Boolean = false // 確定済みか
+)
+
+var floatingSelection: FloatingSelection? = null
+```
+
+**操作メソッド：**
+```kotlin
+fun createFloatingSelection(
+    selectionMask: ByteArray,
+    layerIds: List<Int> = listOf(activeLayerId)  // 複数選択対応
+): Boolean {
+    // 選択範囲内のピクセルを各レイヤーからコピー
+    // 元データは COW で保持（メモリ効率化）
+    // 浮遊選択層を visualLayers に追加（UI描画用）
+}
+
+fun moveFloatingSelection(dx: Float, dy: Float): Boolean {
+    // currentBounds を移動
+}
+
+fun scaleFloatingSelection(
+    sx: Float, sy: Float,
+    anchor: FloatingSelectionAnchor  // CENTER / TOP_LEFT / TOP_RIGHT / etc.
+): Boolean {
+    // transformMatrix を更新
+}
+
+fun rotateFloatingSelection(angle: Float, cx: Float, cy: Float): Boolean {
+    // transformMatrix を回転成分で更新
+}
+
+fun confirmFloatingSelection(): Boolean {
+    // 浮遊選択層を各元レイヤーに統合
+    // Undo スタックに追加
+    // floatingSelection = null
+}
+
+fun cancelFloatingSelection(): Boolean {
+    // 浮遊選択層を破棄
+    // 元データは变更なし
+    // floatingSelection = null
+}
+```
+
+#### Flutter側（paint_canvas.dart / floating_selection_tool.dart）
+
+**UI状態管理：**
+```dart
+class PaintState {
+  final FloatingSelectionState? floatingSelection;  // 浮遊選択層の状態
+  
+  bool get hasFloatingSelection => floatingSelection != null;
+}
+
+class FloatingSelectionState {
+  final Rect bounds;                    // 画面座標でのバウンディングボックス
+  final Matrix4 transformMatrix;        // 変形行列
+  final List<FloatingSelectionHandle> handles;  // 8個のハンドル
+}
+
+enum FloatingSelectionHandle {
+  topLeft, top, topRight,
+  left, right,
+  bottomLeft, bottom, bottomRight
+}
+```
+
+**UIレンダリング（CustomPainter）：**
+```dart
+class FloatingSelectionPainter extends CustomPainter {
+  final FloatingSelectionState state;
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    final bounds = state.bounds;
+    
+    // バウンディングボックス（破線）
+    canvas.drawRect(
+      bounds,
+      Paint()
+        ..color = Colors.blue
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeDashPattern = [5, 5]  // 破線
+    );
+    
+    // 8個のハンドル
+    for (final handle in state.handles) {
+      drawHandle(canvas, handle.position, handle.type);
+    }
+    
+    // 中央ドラッグ用インジケータ
+    canvas.drawCircle(
+      bounds.center,
+      10,
+      Paint()
+        ..color = Colors.blue.withOpacity(0.3)
+        ..style = PaintingStyle.fill
+    );
+  }
+  
+  void drawHandle(Canvas canvas, Offset position, FloatingSelectionHandle type) {
+    canvas.drawCircle(
+      position,
+      8,
+      Paint()
+        ..color = Colors.blue
+        ..style = PaintingStyle.fill
+    );
+  }
+}
+```
+
+**ジェスチャー処理：**
+```dart
+// paint_canvas.dart に追加
+
+GestureDetector(
+  onPanUpdate: (details) {
+    if (!paintState.hasFloatingSelection) return;
+    
+    final floatingState = paintState.floatingSelection!;
+    final draggedHandle = detectHandleAtPosition(details.globalPosition);
+    
+    if (draggedHandle == null) {
+      // 背景ドラッグ → 移動
+      channel.invokeMethod('moveFloatingSelection', {
+        'dx': details.delta.dx / zoom,
+        'dy': details.delta.dy / zoom,
+      });
+    } else {
+      // ハンドルドラッグ → スケール or 回転
+      applyHandleDrag(draggedHandle, details);
+    }
+  },
+  onTapUp: (details) {
+    // 浮遊選択層の外をタップ → 確定
+    if (!isPointInFloatingSelection(details.globalPosition)) {
+      channel.invokeMethod('confirmFloatingSelection');
+    }
+  },
+  onLongPress: () {
+    // 長押し → 回転モード に切り替え（将来）
+  },
+  child: CustomPaint(
+    painter: FloatingSelectionPainter(paintState.floatingSelection),
+    child: GestureDetector(
+      onKey: (event) {
+        if (event.isKeyPressed(LogicalKeyboardKey.enter)) {
+          channel.invokeMethod('confirmFloatingSelection');
+        } else if (event.isKeyPressed(LogicalKeyboardKey.escape)) {
+          channel.invokeMethod('cancelFloatingSelection');
+        }
+      },
+    )
+  )
+)
+```
+
+### 実装計画
+
+#### **Phase 3.5: 浮遊選択層の基本実装（優先度：高）**
+
+**3.5-1. FloatingSelection データモデル定義（1時間）**
+- Kotlin: FloatingSelection データクラス
+- Serialization (MethodChannel 用)
+
+**3.5-2. 浮遊選択層の作成・統合（3時間）**
+- `createFloatingSelection(selectionMask, layerIds)` 実装
+- `confirmFloatingSelection()` 実装
+- `cancelFloatingSelection()` 実装
+- Undo/Redo 対応
+
+**3.5-3. 移動・スケール処理（2時間）**
+- `moveFloatingSelection(dx, dy)` 実装
+- `scaleFloatingSelection(sx, sy, anchor)` 実装
+- 変形行列の管理
+
+**3.5-4. Flutter UI（CustomPainter + GestureDetector）（3時間）**
+- FloatingSelectionPainter の実装
+- 8ハンドルの描画と座標計算
+- ドラッグハンドラの実装
+- Enter/Escape キー処理
+
+**3.5-5. ハンドル検出・ドラッグ処理（2時間）**
+- タップ座標がハンドル範囲内か判定
+- ハンドル種別に応じたスケール計算（宽高比保持オプション）
+
+#### **Phase 3.6: 浮遊選択層のプレビュー・視覚フィードバック（優先度：中）**
+
+**3.6-1. リアルタイムプレビュー（2時間）**
+- ドラッグ中に FloatingSelectionPainter を即座に更新
+- マーチングアンツアニメーション（選択範囲エッジ）
+
+**3.6-2. ハンドル UI の改善（1時間）**
+- ハンドルホバー時のハイライト
+- カーソル変更（N-Resize, NW-Resize, Move 等）
+
+#### **Phase 3.7: 複数選択レイヤー × 浮遊選択層（優先度：中）**
+
+**3.7-1. 複数レイヤー浮遊対応（1.5時間）**
+- createFloatingSelection(selectionMask, layerIds: List) の実装
+- 各レイヤーのピクセルを別々に保持・復元
+
+### 既知の課題・最適化機会
+
+1. **ハンドルの宽高比保持**
+   - Shift キー押下で宽高比ロック
+   - 将来的には設定で選択可能に
+
+2. **回転ハンドル（9番目のハンドル）**
+   - 現状はスケール・移動のみ
+   - 将来：中央ハンドルの外側にドラッグで回転
+
+3. **メモリ効率化（大規模浮遊選択）**
+   - 選択範囲が大きい場合（例：2K×2K）のメモリ使用量
+   - COW + タイルキャッシュで圧縮可能
+
+4. **複数レイヤー浮遊時の演算コスト**
+   - 各レイヤーの変形処理が O(n) → 将来並列化可能
+
+### チェックリスト
+
+- [ ] Phase 3.5-1: FloatingSelection データモデル定義
+- [ ] Phase 3.5-2: 浮遊選択層の CRUD 実装
+- [ ] Phase 3.5-3: 移動・スケール処理
+- [ ] Phase 3.5-4: Flutter UI (CustomPainter + GestureDetector)
+- [ ] Phase 3.5-5: ハンドル検出・ドラッグ処理
+- [ ] ビルド確認
+- [ ] 実機テスト：選択範囲作成 → 移動 → スケール → 確定
+
+---
+
+## 複数選択レイヤー×選択範囲による統一編集・変形
+
+複数のレイヤーを同時選択した状態で選択範囲を適用し、**選択範囲内のみ** 統一した編集・変形操作（移動・スケール・回転など）を実行する機能。
+
+### タブレット＋ペン最適化ジェスチャー仕様
+
+**現在の実装（Flutter layer_panel.dart）:**
+
+#### **左スワイプ：複数選択に追加**
+```
+状態遷移: 単一選択 → 複数選択
+トリガー: レイヤーを左にスワイプ（-40dp 以上）
+結果:
+  - レイヤーが複数選択リストに追加
+  - 背景に「+追加」表示
+  - アニメーション: 200ms easeOut で背景アクションUI表示
+  
+複数選択中：
+  - 左スワイプ：未選択レイヤーを追加
+  - 既に選択中なら何もしない
+```
+
+#### **右スワイプ：複数選択から削除**
+```
+状態遷移: 複数選択 → 複数選択から1件削除
+トリガー: レイヤーを右にスワイプ（+40dp 以上）
+結果:
+  - 複数選択中かつこのレイヤーが選択済み → 削除
+  - 複数選択未開始 → 複数選択開始
+  - 背景表示：
+    - 複数選択中＆選択済み：「-削除」（赤）
+    - 複数選択中＆未選択：「+追加」（青）
+    - 複数選択未開始：「+選択」（青）
+  - アニメーション: 200ms easeOut で背景アクションUI表示
+```
+
+#### **ヘッダー「X件選択」表示**
+```
+複数選択中のみ表示:
+  - 選択件数カウント（例：「3件選択」）
+  - 「✕」ボタンで一括解除
+  - 上移動・下移動・結合・削除ボタン
+```
+
+#### **長押し後のドラッグ：複数レイヤー一括移動**
+```
+状態遷移: Idle → LongPress → Dragging
+トリガー: レイヤーを長押し（300ms以上）→ ドラッグ開始
+結果:
+  - 複数選択中：全選択レイヤーを同時移動
+  - 単一選択中：該当レイヤーのみ移動
+  - ドラッグフィードバック: Material elevation:8
+  - オートスクロール: リスト上下端 80dp ゾーン
+  - ドロップ先：
+    - フォルダ内にドロップ → 全選択レイヤーを移動
+    - 同じ階層にドロップ → 相対順序を保持して並び替え
+    - ホバー 0.5秒でフォルダ自動展開
+  
+実装: LongPressDraggable<int> + DragTarget + ReorderableListView互換
+```
+
+### 複数選択レイヤーの状態管理
+
+**Flutter側（layer_panel.dart）:**
+```dart
+class _LayerPanelState extends State<LayerPanel> {
+  final Set<int> _selectedIds = {};          // 複数選択中のレイヤーID
+  
+  bool get _hasMultipleSelection => _selectedIds.length > 1;
+  
+  void _toggleSelection(int id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+  
+  void _clearSelection() {
+    setState(() => _selectedIds.clear());
+  }
+}
+```
+
+**Kotlin側（PaintViewModel.kt）:**
+```
+現状: PaintViewModel に複数選択フィールドなし
+推奨: 将来的に selectedLayerIds: MutableSet<Int> を追加して
+      Kotlin側でも複数選択状態を管理可能にする
+      ただし現在は Flutter側で十分に機能
+```
+
+### 選択範囲×複数選択レイヤーの統一編集
+
+**シーケンス:**
+```
+1. 複数レイヤーを選択（左スワイプで追加）
+2. SelectionTool で選択範囲を作成
+3. TransformTool / MoveTool をアクティブ化
+4. 変形操作実行:
+   - ドラッグで移動（選択範囲内のみ）
+   - ハンドルドラッグでスケール・回転
+   - 全選択レイヤーに統一した変形を適用
+5. Enter キーで確定 / Escape で キャンセル
+```
+
+**制約:**
+- 選択範囲がない場合：変形操作は対象外
+- 複数選択がない場合：単一レイヤーの変形のみ
+- レイヤーグループが選択中：グループ内の全レイヤーに適用
+
+### 実装上の注意点
+
+#### **UI/UX：ビジュアルフィードバック（タブレット最適）**
+
+1. **複数選択中の表示**
+   - レイヤーアイテムの背景色を薄いアクセント色に（alpha: 40）
+   - 選択アイコン：チェックマークアイコン表示
+   - ハイライト色：C.accent (例：青）
+
+2. **スワイプアニメーション**
+   - 左スワイプ：背景に「+追加」ボタン表示（アクセント色）
+   - 右スワイプ：背景に「-削除」ボタン表示（エラー色）or「+選択」（アクセント色）
+   - アニメーション速度：200ms easeOut（ResponsiveTouch 最適化）
+
+3. **ドラッグフィードバック**
+   - ドラッグ中のアイテム：opacity 0.5（半透明）
+   - ドロップ可能フォルダ：背景色変更 + elevation 上昇
+   - ドロップインジケータ：青い破線の横線（挿入位置表示）
+   - ドラッグ中のマテリアル elevation: 8（浮き上がり効果）
+
+4. **複数選択状態の確認**
+   - ヘッダーに「N件選択」テキスト表示
+   - スワイプ背景で現在のアクション（追加/削除）を明確化
+
+#### **ジェスチャー衝突回避**
+
+- **2本指タップ**: Undo用（スワイプと競合しないよう機器レベルで処理）
+- **3本指タップ**: Redo用（Undo同様）
+- **長押し**: ドラッグ開始（300ms閾値）
+- **スワイプ**: 左右（-40dp / +40dp 閾値）
+
+上記が衝突しない設計に。
+
+#### **複数選択解除のトリガー**
+
+```
+以下の操作で自動的に複数選択をクリア:
+1. ドラッグ＆ドロップ完了後
+2. 単一レイヤーをタップ（複数選択がない場合）
+3. ヘッダーの「✕」ボタンをタップ
+4. 空白エリア（レイヤーパネル外）をタップ（将来）
+5. Escape キー（将来、キーボード接続時）
+```
+
+### チェックリスト（実装状況）
+
+**既に実装済み ✅**
+- [x] `_selectedIds: Set<int>` で複数選択管理
+- [x] 左スワイプで複数選択追加
+- [x] 右スワイプで複数選択削除
+- [x] 長押し後ドラッグで複数レイヤー移動
+- [x] ドロップ後に自動選択解除
+- [x] 複数選択時のハイライト表示
+- [x] ヘッダーに選択件数表示
+
+**未実装・将来予定 📋**
+- [ ] 複数選択×選択範囲の統一変形（Phase 3）
+- [ ] 複数レイヤーの変形時にすべてのレイヤーに統一の変形行列を適用
+- [ ] 選択範囲マスクで変形範囲をクリップ
+- [ ] 複数選択時の Kotlin側でも状態管理
+- [ ] EventChannel で複数選択状態の同期
+- [ ] 空白タップで選択解除（ジェスチャーハンドラ追加）
+- [ ] キーボード検出（Shift/Ctrl+タップ）対応（将来）

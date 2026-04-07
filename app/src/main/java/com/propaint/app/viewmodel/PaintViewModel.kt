@@ -1399,7 +1399,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int) {
         val doc = _document ?: return
-        doc.reorderLayerGroup(fromGroupId, toGroupId)
+        // グループID（負数）を正に変換（Flutter側での表現）
+        val actualFromId = if (fromGroupId < 0) -fromGroupId else fromGroupId
+        val actualToId = if (toGroupId < 0) -toGroupId else toGroupId
+        doc.reorderLayerGroup(actualFromId, actualToId)
         updateLayerState()
     }
 
@@ -1600,7 +1603,9 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _document?.createLayerGroup(name); updateLayerState()
     }
     fun deleteLayerGroup(groupId: Int) {
-        _document?.deleteLayerGroup(groupId); updateLayerState()
+        // グループID（負数）を正に変換（Flutter側での表現）
+        val actualGroupId = if (groupId < 0) -groupId else groupId
+        _document?.deleteLayerGroup(actualGroupId); updateLayerState()
     }
     fun setLayerGroup(layerId: Int, groupId: Int) {
         // groupId が負数（Flutter 側でのグループID表現）の場合は正数に変換
@@ -1608,10 +1613,14 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         _document?.setLayerGroup(layerId, actualGroupId); updateLayerState()
     }
     fun setGroupVisibility(groupId: Int, visible: Boolean) {
-        _document?.setGroupVisibility(groupId, visible); updateLayerState()
+        // グループID（負数）を正に変換（Flutter側での表現）
+        val actualGroupId = if (groupId < 0) -groupId else groupId
+        _document?.setGroupVisibility(actualGroupId, visible); updateLayerState()
     }
     fun setGroupOpacity(groupId: Int, opacity: Float) {
-        _document?.setGroupOpacity(groupId, opacity); updateLayerState()
+        // グループID（負数）を正に変換（Flutter側での表現）
+        val actualGroupId = if (groupId < 0) -groupId else groupId
+        _document?.setGroupOpacity(actualGroupId, opacity); updateLayerState()
     }
 
     // ── フィルター ──────────────────────────────────────────────────

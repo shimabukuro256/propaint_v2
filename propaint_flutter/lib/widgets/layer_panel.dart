@@ -600,6 +600,7 @@ class _LayerPanelState extends State<LayerPanel> {
       isExpandedGroup: isExpandedGroup,
       isDragOverTarget: isDragOverTarget,
       channel: widget.channel,
+      hasMultipleSelection: _selectedIds.length > 1,  // 複数選択中か判定
       onTap: () {
         if (_selectedIds.isNotEmpty) {
           _toggleSelection(layer.id);
@@ -648,6 +649,7 @@ class _SwipeableLayerItem extends StatefulWidget {
   final bool isExpandedGroup;
   final bool isDragOverTarget;
   final PaintChannel channel;
+  final bool hasMultipleSelection;  // 複数選択状態が有効か
   final VoidCallback onTap;
   final VoidCallback onToggleExpand;
   final VoidCallback onToggleGroup;
@@ -665,6 +667,7 @@ class _SwipeableLayerItem extends StatefulWidget {
     required this.isExpandedGroup,
     required this.isDragOverTarget,
     required this.channel,
+    required this.hasMultipleSelection,
     required this.onTap,
     required this.onToggleExpand,
     required this.onToggleGroup,
@@ -722,73 +725,74 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
           height: null,
           child: Stack(
             children: [
-              // 左スワイプ背景
+              // 左スワイプ背景 → 複数選択に追加
               if (offset < -4)
                 Positioned.fill(
                   child: Container(
                     alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.only(right: 4),
+                    padding: const EdgeInsets.only(right: 12),
+                    color: C.accent.withAlpha(10),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (!widget.layer.isGroup) ...[
-                          _ActionChip(
-                            icon: Icons.copy_rounded,
-                            label: '複製',
-                            color: C.accent,
-                            onTap: () {
-                              widget.channel.duplicateLayer(widget.layer.id);
-                              _animateTo(0);
-                            },
-                          ),
-                          const SizedBox(width: 2),
-                          _ActionChip(
-                            icon: Icons.merge_rounded,
-                            label: '結合',
-                            color: C.textSecondary,
-                            onTap: () {
-                              widget.channel.mergeDown(widget.layer.id);
-                              _animateTo(0);
-                            },
-                          ),
-                          const SizedBox(width: 2),
-                        ],
-                        _ActionChip(
-                          icon: Icons.delete_rounded,
-                          label: '削除',
-                          color: C.error,
-                          onTap: () {
-                            if (widget.layer.isGroup) {
-                              widget.channel.deleteLayerGroup(-widget.layer.id);
-                            } else {
-                              widget.channel.removeLayer(widget.layer.id);
-                            }
-                            _animateTo(0);
-                          },
+                        Icon(
+                          widget.selected ? Icons.check_circle_rounded : Icons.add_circle_rounded,
+                          size: 18,
+                          color: C.accent,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          widget.selected ? '選択済み' : '追加',
+                          style: const TextStyle(color: C.accent, fontSize: 11, fontWeight: FontWeight.w600),
                         ),
                       ],
                     ),
                   ),
                 ),
 
-              // 右スワイプ背景
+              // 右スワイプ背景 → 複数選択中は削除、未選択時は選択
               if (offset > 4)
                 Positioned.fill(
                   child: Container(
                     alignment: Alignment.centerLeft,
                     padding: const EdgeInsets.only(left: 12),
+                    color: (widget.hasMultipleSelection && widget.selected)
+                        ? C.error.withAlpha(10)
+                        : C.accent.withAlpha(10),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          widget.selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
-                          size: 18,
-                          color: widget.selected ? C.accent : C.textSecondary,
-                        ),
+                        if (widget.hasMultipleSelection && widget.selected)
+                          // 複数選択中＆このレイヤーが選択中 → 削除
+                          Icon(
+                            Icons.remove_circle_rounded,
+                            size: 18,
+                            color: C.error,
+                          )
+                        else if (!widget.hasMultipleSelection)
+                          // 複数選択未開始 → 選択
+                          Icon(
+                            Icons.add_circle_rounded,
+                            size: 18,
+                            color: C.accent,
+                          )
+                        else
+                          // 複数選択中だがこのレイヤーは未選択 → 追加
+                          Icon(
+                            Icons.add_circle_rounded,
+                            size: 18,
+                            color: C.accent,
+                          ),
                         const SizedBox(width: 4),
                         Text(
-                          widget.selected ? '選択解除' : '選択',
-                          style: const TextStyle(color: C.textSecondary, fontSize: 11),
+                          widget.hasMultipleSelection && widget.selected
+                              ? '削除'
+                              : (widget.hasMultipleSelection ? '追加' : '選択'),
+                          style: TextStyle(
+                            color: (widget.hasMultipleSelection && widget.selected) ? C.error : C.accent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ],
                     ),
@@ -804,9 +808,14 @@ class _SwipeableLayerItemState extends State<_SwipeableLayerItem>
                   });
                 },
                 onHorizontalDragEnd: (d) {
-                  if (_dragOffset < -50) {
+                  if (_dragOffset < -40) {
+                    // 左スワイプ → 複数選択に追加（未選択時のみ）
+                    if (!widget.selected) {
+                      widget.onSwipeSelect();
+                    }
                     _animateTo(-_leftRevealWidth);
                   } else if (_dragOffset > 40) {
+                    // 右スワイプ → toggle（複数選択中は削除、未選択なら追加）
                     widget.onSwipeSelect();
                     _animateTo(0);
                   } else {
