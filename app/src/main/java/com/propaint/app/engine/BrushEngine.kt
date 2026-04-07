@@ -450,9 +450,30 @@ class BrushEngine(
         val tx1 = minOf(surface.tilesX - 1, surface.pixelToTile(dr - 1))
         val ty1 = minOf(surface.tilesY - 1, surface.pixelToTile(db - 1))
 
+        // 選択範囲がある場合は、バウンディングボックスをクリップ
+        val sm = selectionManager
+        val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
+        if (selBounds != null) {
+            // 選択範囲外のダブは描画しない
+            if (tx0 > selBounds[2] || tx1 < selBounds[0] ||
+                ty0 > selBounds[3] || ty1 < selBounds[1]) {
+                return  // 完全に選択範囲外
+            }
+        }
+
         for (ty in ty0..ty1) for (tx in tx0..tx1) {
             val tile = surface.getOrCreateMutable(tx, ty)
             val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
+
+            // 選択範囲チェック: タイルの全ピクセルが選択範囲外でないか確認
+            if (selBounds != null) {
+                val tileBounds = intArrayOf(ox, oy, ox + Tile.SIZE, oy + Tile.SIZE)
+                if (tileBounds[0] >= selBounds[2] || tileBounds[2] <= selBounds[0] ||
+                    tileBounds[1] >= selBounds[3] || tileBounds[3] <= selBounds[1]) {
+                    continue  // このタイルは選択範囲外
+                }
+            }
+
             PixelOps.applyDabToTile(
                 tile.pixels, dab.data, dab.diameter, color, opacity, blendMode,
                 maxOf(0, dab.left - ox), maxOf(0, dab.top - oy),
@@ -481,6 +502,17 @@ class BrushEngine(
         val tx1 = minOf(surface.tilesX - 1, surface.pixelToTile(dr - 1))
         val ty1 = minOf(surface.tilesY - 1, surface.pixelToTile(db - 1))
 
+        // 選択範囲がある場合は、バウンディングボックスをクリップ
+        val sm = selectionManager
+        val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
+        if (selBounds != null) {
+            // 選択範囲外のダブは描画しない
+            if (tx0 > selBounds[2] || tx1 < selBounds[0] ||
+                ty0 > selBounds[3] || ty1 < selBounds[1]) {
+                return  // 完全に選択範囲外
+            }
+        }
+
         val ca = PixelOps.alpha(color); val cr = PixelOps.red(color)
         val cg = PixelOps.green(color); val cb = PixelOps.blue(color)
         val minDa = if (blendMode == PixelOps.BLEND_ERASE) 1 else maxOf(1,
@@ -490,6 +522,16 @@ class BrushEngine(
         )
 
         for (ty in ty0..ty1) for (tx in tx0..tx1) {
+            // 選択範囲チェック: タイルの全ピクセルが選択範囲外でないか確認
+            if (selBounds != null) {
+                val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
+                val tileBounds = intArrayOf(ox, oy, ox + Tile.SIZE, oy + Tile.SIZE)
+                if (tileBounds[0] >= selBounds[2] || tileBounds[2] <= selBounds[0] ||
+                    tileBounds[1] >= selBounds[3] || tileBounds[3] <= selBounds[1]) {
+                    continue  // このタイルは選択範囲外
+                }
+            }
+
             val tile = surface.getOrCreateMutable(tx, ty)
             val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
             val clipL = maxOf(0, dab.left - ox); val clipT = maxOf(0, dab.top - oy)
@@ -666,8 +708,22 @@ class BrushEngine(
         if (drawTarget === sampleSource) {
             for (ly in 0 until h) for (lx in 0 until w) {
                 val gx = x0 + lx; val gy = y0 + ly
-                val px = if (sm != null && sm.getMaskValue(gx, gy) < 255) 0
-                    else drawTarget.getPixelAt(gx, gy)
+                var px = drawTarget.getPixelAt(gx, gy)
+
+                // 選択範囲チェック: 部分選択ピクセルのアルファを減衰
+                if (sm != null) {
+                    val maskVal = sm.getMaskValue(gx, gy)
+                    if (maskVal == 0) {
+                        px = 0  // 完全非選択: 透明
+                    } else if (maskVal < 255) {
+                        // 部分選択: アルファを減衰
+                        val fadeAlpha = maskVal / 255f
+                        val origAlpha = PixelOps.alpha(px)
+                        val newAlpha = (origAlpha * fadeAlpha).toInt().coerceIn(0, 255)
+                        px = PixelOps.pack(newAlpha, PixelOps.red(px), PixelOps.green(px), PixelOps.blue(px))
+                    }
+                }
+
                 blurSrc[ly * w + lx] = px
                 blurLin[ly * w + lx] = pixelToWide64(px)
             }
@@ -700,7 +756,10 @@ class BrushEngine(
                     }
 
                 val gpx = x0 + lx; val gpy = y0 + ly
-                if (sm != null && sm.getMaskValue(gpx, gpy) < 255) continue
+
+                // 選択範囲チェック: 完全非選択はスキップ
+                if (sm != null && sm.getMaskValue(gpx, gpy) == 0) continue
+
                 val tx = drawTarget.pixelToTile(gpx)
                 val ty = drawTarget.pixelToTile(gpy)
                 if (tx < 0 || tx >= drawTarget.tilesX || ty < 0 || ty >= drawTarget.tilesY) continue
