@@ -154,4 +154,30 @@ class TiledSurface(val width: Int, val height: Int) {
             }
         }
     }
+
+    /**
+     * 描画済み（非透明）ピクセルのバウンディングボックスを取得。
+     * @return IntArray [minX, minY, maxX+1, maxY+1] or null (全て透明)
+     */
+    fun getContentBounds(): IntArray? {
+        var minX = width; var minY = height; var maxX = -1; var maxY = -1
+        for (ty in 0 until tilesY) for (tx in 0 until tilesX) {
+            val tile = getTile(tx, ty) ?: continue
+            val bx = tx * Tile.SIZE; val by = ty * Tile.SIZE
+            for (ly in 0 until Tile.SIZE) {
+                val py = by + ly; if (py >= height) break
+                for (lx in 0 until Tile.SIZE) {
+                    val px = bx + lx; if (px >= width) break
+                    if (tile.pixels[ly * Tile.SIZE + lx] != 0) {
+                        if (px < minX) minX = px
+                        if (px > maxX) maxX = px
+                        if (py < minY) minY = py
+                        if (py > maxY) maxY = py
+                    }
+                }
+            }
+        }
+        if (maxX < 0) return null  // 全て透明
+        return intArrayOf(minX, minY, maxX + 1, maxY + 1)
+    }
 }

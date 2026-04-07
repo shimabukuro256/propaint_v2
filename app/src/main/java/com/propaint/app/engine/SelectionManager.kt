@@ -74,6 +74,7 @@ class SelectionManager(val width: Int, val height: Int) {
                 }
             }
         }
+        _boundsCacheDirty = true  // バウンディングボックスキャッシュを無効化
     }
 
     // ── 選択範囲生成 ────────────────────────────────────────────
