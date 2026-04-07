@@ -50,7 +50,7 @@ enum class BrushType(
 
 enum class ToolMode {
     Draw, Eyedropper,
-    SelectLasso, SelectMagicWand,
+    SelectMagnet, SelectMagicWand,
     SelectPen,
     Transform,
     PixelCopy,
@@ -864,55 +864,61 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
-        // なげなわ選択 (SelectLasso): ドラッグでポリゴン頂点を蓄積（複数ストローク対応）
-        if (_toolMode.value == ToolMode.SelectLasso) {
+        // マグネット選択 (SelectMagnet): タップでアンカーポイント設定、エッジ自動追跡
+        if (_toolMode.value == ToolMode.SelectMagnet) {
+            val surface = doc.getActiveLayer()?.content ?: return true
+
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    // 最初のストロークなら新規開始、2回目以降なら続行
-                    if (_lassoPoints.isEmpty()) {
-                        val (dx, dy) = screenToDoc(event.x, event.y)
-                        _lassoPoints.add(dx.toInt() to dy.toInt())
-                        PaintDebug.d(PaintDebug.Input) { "[Lasso] stroke start, points=${_lassoPoints.size}" }
+                MotionEvent.ACTION_UP -> {
+                    val (dx, dy) = screenToDoc(event.x, event.y)
+                    val tapX = dx.toInt()
+                    val tapY = dy.toInt()
+
+                    // 開始点がまだ設定されていない：最初のタップ
+                    if (_magnetStart == null) {
+                        _magnetStart = tapX to tapY
+                        _magnetPoints.add(tapX to tapY)
+                        PaintDebug.d(PaintDebug.Input) { "[Magnet] start anchor set at ($tapX, $tapY)" }
                     } else {
-                        // 既にポイント蓄積中: 続行ストロークの最初のポイント（クリアしない）
-                        val (dx, dy) = screenToDoc(event.x, event.y)
-                        val point = dx.toInt() to dy.toInt()
-                        val lastPoint = _lassoPoints.lastOrNull()
-                        if (lastPoint != point) {
-                            _lassoPoints.add(point)
+                        // 終点が開始点に近い（30px以内）か判定 → 自動確定
+                        val start = _magnetStart!!
+                        val distToStart = hypot((tapX - start.first).toDouble(), (tapY - start.second).toDouble())
+
+                        if (distToStart < 30.0 && _magnetPoints.size >= 3) {
+                            // パスを開始点に閉じて確定
+                            val lastPoint = _magnetPoints.lastOrNull()
+                            if (lastPoint != null) {
+                                _magnetPath.addAll(traceMagnetPath(surface, lastPoint.first, lastPoint.second, start.first, start.second))
+                            }
+                            _magnetPath.add(start)  // 閉じるために開始点を追加
+
+                            // 選択を確定
+                            selectLasso(_magnetPath.toList())
+                            _magnetStart = null
+                            _magnetPoints.clear()
+                            _magnetPath.clear()
+                            PaintDebug.d(PaintDebug.Input) { "[Magnet] selection finalized (auto-closed)" }
+                        } else {
+                            // 新規アンカーポイント追加 + 前のアンカーから現在位置へエッジ追跡
+                            val lastPoint = _magnetPoints.lastOrNull()
+                            if (lastPoint != null) {
+                                _magnetPath.addAll(traceMagnetPath(surface, lastPoint.first, lastPoint.second, tapX, tapY))
+                            }
+                            _magnetPoints.add(tapX to tapY)
+                            PaintDebug.d(PaintDebug.Input) { "[Magnet] anchor added at ($tapX, $tapY), anchors=${_magnetPoints.size}" }
                         }
-                        PaintDebug.d(PaintDebug.Input) { "[Lasso] continue stroke, points=${_lassoPoints.size}" }
                     }
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (_lassoPoints.isNotEmpty()) {
-                        val (dx, dy) = screenToDoc(event.x, event.y)
-                        val point = dx.toInt() to dy.toInt()
-                        // 前回のポイントと距離が十分あれば追加（スムージング: 8px で緩和）
-                        val lastPoint = _lassoPoints.lastOrNull()
-                        if (lastPoint != null && kotlin.math.hypot(
-                            (dx - lastPoint.first).toFloat(),
-                            (dy - lastPoint.second).toFloat()
-                        ) >= 8f) {
-                            _lassoPoints.add(point)
-                        }
-                    }
-                }
-                MotionEvent.ACTION_UP -> {
-                    // 指を上げたら：最小3点以上なら選択確定
-                    if (_lassoPoints.size >= 3) {
-                        selectLasso(_lassoPoints)
-                        _lassoPoints.clear()
-                        PaintDebug.d(PaintDebug.Input) { "[Lasso] selection finalized" }
-                    } else if (_lassoPoints.size > 0) {
-                        // 3点未満なら続行を促す（クリアしない）
-                        PaintDebug.d(PaintDebug.Input) { "[Lasso] needs more points (current=${_lassoPoints.size})" }
-                    }
+                    // リアルタイムプレビュー：最後のアンカーから現在位置への仮パス
+                    // (現在の実装では省略。必要に応じてプレビューレンダリングを追加)
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    // キャンセル時のみクリア
-                    _lassoPoints.clear()
-                    PaintDebug.d(PaintDebug.Input) { "[Lasso] cancelled" }
+                    // キャンセル
+                    _magnetStart = null
+                    _magnetPoints.clear()
+                    _magnetPath.clear()
+                    PaintDebug.d(PaintDebug.Input) { "[Magnet] cancelled" }
                 }
             }
             return true
@@ -1065,8 +1071,108 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var _selectionDragStart: Pair<Float, Float>? = null
     /** なげなわ選択のポイント蓄積 */
     private val _lassoPoints = mutableListOf<Pair<Int, Int>>()
+
+    /** マグネット選択: 開始アンカーポイント */
+    private var _magnetStart: Pair<Int, Int>? = null
+    /** マグネット選択: 蓄積アンカーポイント */
+    private val _magnetPoints = mutableListOf<Pair<Int, Int>>()
+    /** マグネット選択: 確定済みパス */
+    private val _magnetPath = mutableListOf<Pair<Int, Int>>()
+
     /** 図形ツールのドラッグ開始座標 (ドキュメント座標) */
     private var _shapeDragStart: Pair<Float, Float>? = null
+
+    // ─────────────────────────────────────────
+    // マグネット選択のヘルパー関数
+    // ─────────────────────────────────────────
+
+    /** 指定座標のエッジ強度を計算（輝度勾配） */
+    private fun edgeStrength(surface: TiledSurface, x: Int, y: Int): Float {
+        fun lum(px: Int, py: Int): Float {
+            val p = PixelOps.unpremultiply(surface.getPixelAt(px, py))
+            return PixelOps.red(p) * 0.299f + PixelOps.green(p) * 0.587f + PixelOps.blue(p) * 0.114f
+        }
+        val gx = lum(x + 1, y) - lum(x - 1, y)
+        val gy = lum(x, y + 1) - lum(x, y - 1)
+        return sqrt(gx * gx + gy * gy)
+    }
+
+    /** A→B のベクトルに垂直な方向でエッジが強い点を探す */
+    private fun findBestEdgePoint(
+        surface: TiledSurface,
+        cx: Int, cy: Int,
+        ax: Int, ay: Int, bx: Int, by: Int,
+        width: Int = 5
+    ): Pair<Int, Int> {
+        // A→B のベクトル
+        val dx = (bx - ax).toFloat()
+        val dy = (by - ay).toFloat()
+        val len = hypot(dx, dy).coerceAtLeast(1f)
+        // 法線ベクトル（垂直方向）
+        val nx = (-dy / len).toInt()
+        val ny = (dx / len).toInt()
+
+        var bestStr = -1f
+        var bestX = cx
+        var bestY = cy
+
+        for (d in -width..width) {
+            val px = cx + nx * d
+            val py = cy + ny * d
+            val str = edgeStrength(surface, px, py)
+            if (str > bestStr) {
+                bestStr = str
+                bestX = px
+                bestY = py
+            }
+        }
+        return bestX to bestY
+    }
+
+    /** A→B の経路を Bresenham + エッジ追跡で生成 */
+    private fun traceMagnetPath(
+        surface: TiledSurface,
+        ax: Int, ay: Int, bx: Int, by: Int,
+        snappingWidth: Int = 5
+    ): List<Pair<Int, Int>> {
+        val points = mutableListOf<Pair<Int, Int>>()
+
+        var x = ax
+        var y = ay
+        val dx = abs(bx - ax)
+        val dy = abs(by - ay)
+        val sx = if (ax < bx) 1 else -1
+        val sy = if (ay < by) 1 else -1
+        var err = dx - dy
+
+        while (true) {
+            // 垂直方向にエッジ探索
+            val snapped = findBestEdgePoint(surface, x, y, ax, ay, bx, by, snappingWidth)
+            points.add(snapped)
+
+            if (x == bx && y == by) break
+
+            val e2 = 2 * err
+            if (e2 > -dy) {
+                err -= dy
+                x += sx
+            }
+            if (e2 < dx) {
+                err += dx
+                y += sy
+            }
+        }
+
+        return points
+    }
+
+    /** マグネット選択をキャンセル */
+    fun cancelMagnetSelection() {
+        _magnetStart = null
+        _magnetPoints.clear()
+        _magnetPath.clear()
+        PaintDebug.d(PaintDebug.Input) { "[Magnet] selection cancelled via button" }
+    }
 
     /** 選択ペン/消しペン: ブラシサイズの円で選択マスクをペイント */
     private fun paintSelectionMask(event: MotionEvent, doc: CanvasDocument, isAdd: Boolean) {

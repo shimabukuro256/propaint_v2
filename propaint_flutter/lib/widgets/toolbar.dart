@@ -130,7 +130,7 @@ class PaintToolbar extends StatelessWidget {
           _ToolbarIcon(
             icon: Icons.edit_rounded,
             onPressed: () => onTogglePanel(PanelType.selectionTool),
-            isActive: ['SelectPen', 'SelectLasso', 'SelectMagicWand'].contains(state.toolMode) ||
+            isActive: ['SelectPen', 'SelectMagnet', 'SelectMagicWand'].contains(state.toolMode) ||
                       openPanel == PanelType.selectionTool,
             tooltip: '選択',
           ),
@@ -175,7 +175,7 @@ class PaintToolbar extends StatelessWidget {
 
     // 選択範囲関連ツールが有効か判定
     final isSelectionToolActive = const [
-      'SelectLasso', 'SelectMagicWand', 'SelectPen'
+      'SelectMagnet', 'SelectMagicWand', 'SelectPen'
     ].contains(state.toolMode);
 
     return brushDefs.map((def) {

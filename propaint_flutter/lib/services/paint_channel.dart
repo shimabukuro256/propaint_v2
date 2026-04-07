@@ -273,6 +273,9 @@ class PaintChannel {
   /// @param amount: 正=拡張, 負=縮小（ピクセル）
   Future<void> expandSelection(int amount) => _method.invokeMethod('expandSelection', {'amount': amount});
 
+  /// マグネット選択をキャンセル
+  Future<void> cancelMagnetSelection() => _method.invokeMethod('cancelMagnetSelection');
+
   // ─── ピクセルコピー変形（Word/Excel風）───────────────────
 
   /// 選択範囲のピクセルをコピーし、バウンディングボックスを返す

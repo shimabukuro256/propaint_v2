@@ -226,8 +226,8 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
   @override
   Widget build(BuildContext context) {
     final isPenMode = widget.state.toolMode == 'SelectPen';
-    final isLassoMode = widget.state.toolMode == 'SelectLasso';
-    final showModeButtons = isPenMode || isLassoMode;
+    final isMagnetMode = widget.state.toolMode == 'SelectMagnet';
+    final showModeButtons = isPenMode;
     final hasSelection = widget.state.hasSelection;
 
     return Container(
@@ -274,9 +274,9 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
                 ),
                 const SizedBox(width: 4),
                 _buildToolTab(
-                  toolMode: 'SelectLasso',
-                  icon: Icons.gesture_rounded,
-                  label: 'なげなわ',
+                  toolMode: 'SelectMagnet',
+                  icon: Icons.linear_scale_rounded,
+                  label: 'マグネット',
                 ),
                 const SizedBox(width: 4),
                 _buildToolTab(
@@ -378,66 +378,86 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
             const SizedBox(height: 12),
           ],
 
-          // ──────── アクション ────────
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+          // ──────── マグネット選択モード用：キャンセルボタンのみ ────────
+          if (isMagnetMode) ...[
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildActionButton(
+                    icon: Icons.close,
+                    label: 'キャンセル',
+                    onPressed: () => widget.channel.cancelMagnetSelection(),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // ──────── その他モード用：標準アクションボタン ────────
+          if (!isMagnetMode) ...[
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildActionButton(
+                    icon: Icons.blur_on,
+                    label: 'Feather',
+                    onPressed: _onFeather,
+                  ),
+                  const SizedBox(width: 4),
+                  _buildActionButton(
+                    icon: Icons.delete_sweep,
+                    label: 'Delete',
+                    onPressed: _onDelete,
+                  ),
+                  const SizedBox(width: 4),
+                  _buildActionButton(
+                    icon: Icons.content_copy,
+                    label: 'Copy',
+                    onPressed: _onCopyAndTransform,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ──────── 選択操作 ────────
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
               children: [
                 _buildActionButton(
-                  icon: Icons.blur_on,
-                  label: 'Feather',
-                  onPressed: _onFeather,
+                  icon: Icons.select_all,
+                  label: '全選択',
+                  onPressed: _onSelectAll,
                 ),
-                const SizedBox(width: 4),
                 _buildActionButton(
-                  icon: Icons.delete_sweep,
-                  label: 'Delete',
-                  onPressed: _onDelete,
+                  icon: Icons.flip,
+                  label: '反転',
+                  onPressed: hasSelection ? _onInvert : () {},
                 ),
-                const SizedBox(width: 4),
                 _buildActionButton(
-                  icon: Icons.content_copy,
-                  label: 'Copy',
-                  onPressed: _onCopyAndTransform,
+                  icon: Icons.assignment_returned,
+                  label: '選択解除',
+                  onPressed: hasSelection ? _onClear : () {},
+                ),
+                _buildActionButton(
+                  icon: Icons.content_cut,
+                  label: '切り取り',
+                  onPressed: hasSelection ? _onCut : () {},
+                ),
+                _buildActionButton(
+                  icon: Icons.format_color_fill,
+                  label: '塗りつぶし',
+                  onPressed: hasSelection ? _onFill : () {},
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 12),
-
-          // ──────── 選択操作 ────────
-          Wrap(
-            spacing: 4,
-            runSpacing: 4,
-            children: [
-              _buildActionButton(
-                icon: Icons.select_all,
-                label: '全選択',
-                onPressed: _onSelectAll,
-              ),
-              _buildActionButton(
-                icon: Icons.flip,
-                label: '反転',
-                onPressed: hasSelection ? _onInvert : () {},
-              ),
-              _buildActionButton(
-                icon: Icons.assignment_returned,
-                label: '選択解除',
-                onPressed: hasSelection ? _onClear : () {},
-              ),
-              _buildActionButton(
-                icon: Icons.content_cut,
-                label: '切り取り',
-                onPressed: hasSelection ? _onCut : () {},
-              ),
-              _buildActionButton(
-                icon: Icons.format_color_fill,
-                label: '塗りつぶし',
-                onPressed: hasSelection ? _onFill : () {},
-              ),
-            ],
-          ),
+          ],
         ],
       ),
     );

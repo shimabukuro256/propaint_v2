@@ -443,6 +443,9 @@ class PaintMethodChannelHandler(
                 val amount = call.argument<Int>("amount") ?: 5
                 viewModel.expandSelection(amount); result.success(null)
             }
+            "cancelMagnetSelection" -> {
+                viewModel.cancelMagnetSelection(); result.success(null)
+            }
 
             // ── 変形 ──
             "flipLayerH" -> { viewModel.flipActiveLayerH(); result.success(null) }
