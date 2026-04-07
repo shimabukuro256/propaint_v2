@@ -1986,6 +1986,41 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun flipActiveLayerV() { _document?.flipLayerV(_document?.activeLayerId ?: return); updateUndoState() }
     fun rotateActiveLayer90CW() { _document?.rotateLayer90CW(_document?.activeLayerId ?: return); updateUndoState() }
 
+    /**
+     * 複数レイヤーに一括自由変形を適用（プレビュー確定時に呼ばれる）。
+     * @param layerIds 変形対象のレイヤーID一覧
+     * @return true=成功, false=失敗
+     */
+    fun applyMultiLayerTransform(
+        layerIds: List<Int>,
+        scaleX: Float, scaleY: Float,
+        angleDeg: Float, tx: Float, ty: Float,
+    ): Boolean {
+        val doc = _document ?: return false
+        val cx = doc.width / 2f; val cy = doc.height / 2f
+        val success = doc.transformMultipleLayers(layerIds, cx, cy, scaleX, scaleY, angleDeg, tx, ty)
+        if (success) {
+            hasUnsavedChanges = true
+            updateUndoState()
+        }
+        return success
+    }
+
+    /**
+     * 複数レイヤーに一括で反転・回転を適用。
+     * @param layerIds 変形対象のレイヤーID一覧
+     * @param operation "flipH", "flipV", "rotate90CW"
+     */
+    fun applyMultiLayerSimpleTransform(layerIds: List<Int>, operation: String): Boolean {
+        val doc = _document ?: return false
+        val success = doc.transformMultipleLayersSimple(layerIds, operation)
+        if (success) {
+            hasUnsavedChanges = true
+            updateUndoState()
+        }
+        return success
+    }
+
     fun distortActiveLayer(corners: FloatArray) {
         val doc = _document ?: return
         doc.distortLayer(doc.activeLayerId, corners)

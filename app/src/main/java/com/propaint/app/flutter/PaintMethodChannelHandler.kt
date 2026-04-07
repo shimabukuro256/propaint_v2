@@ -484,6 +484,31 @@ class PaintMethodChannelHandler(
                 val nodes = FloatArray(nodesList.size) { nodesList[it].toFloat() }
                 launchHeavy(result) { viewModel.meshWarpActiveLayer(gridW, gridH, nodes) }
             }
+            // ── 複数レイヤー一括変形 ──
+            "applyPreviewTransform" -> {
+                val layerIds = call.argument<List<Int>>("layerIds")
+                if (layerIds == null || layerIds.isEmpty()) {
+                    result.error("INVALID", "layerIds required", null); return
+                }
+                val sx = call.argument<Double>("scaleX")?.toFloat() ?: 1f
+                val sy = call.argument<Double>("scaleY")?.toFloat() ?: 1f
+                val angle = call.argument<Double>("angleDeg")?.toFloat() ?: 0f
+                val tx = call.argument<Double>("translateX")?.toFloat() ?: 0f
+                val ty = call.argument<Double>("translateY")?.toFloat() ?: 0f
+                launchHeavy(result) {
+                    viewModel.applyMultiLayerTransform(layerIds, sx, sy, angle, tx, ty)
+                }
+            }
+            "applyMultiLayerSimpleTransform" -> {
+                val layerIds = call.argument<List<Int>>("layerIds")
+                val operation = call.argument<String>("operation")
+                if (layerIds == null || layerIds.isEmpty() || operation == null) {
+                    result.error("INVALID", "layerIds and operation required", null); return
+                }
+                launchHeavy(result) {
+                    viewModel.applyMultiLayerSimpleTransform(layerIds, operation)
+                }
+            }
             "beginLiquify" -> { viewModel.beginLiquify(); result.success(null) }
             "liquifyLayer" -> {
                 val cx = call.argument<Double>("cx")?.toFloat() ?: 0f

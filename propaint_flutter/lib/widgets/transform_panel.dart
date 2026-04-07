@@ -5,10 +5,54 @@ import '../theme/app_colors.dart';
 import 'panel_card.dart';
 
 /// 変形ツールパネル
+/// selectedLayerIds が2つ以上ある場合、複数レイヤー一括変形を使用。
 class TransformPanel extends StatelessWidget {
   final PaintChannel channel;
+  final List<int> selectedLayerIds;
 
-  const TransformPanel({super.key, required this.channel});
+  const TransformPanel({
+    super.key,
+    required this.channel,
+    this.selectedLayerIds = const [],
+  });
+
+  bool get _isMulti => selectedLayerIds.length >= 2;
+
+  void _flipH() {
+    if (_isMulti) {
+      channel.applyMultiLayerSimpleTransform(
+        layerIds: selectedLayerIds, operation: 'flipH');
+    } else {
+      channel.flipLayerH();
+    }
+  }
+
+  void _flipV() {
+    if (_isMulti) {
+      channel.applyMultiLayerSimpleTransform(
+        layerIds: selectedLayerIds, operation: 'flipV');
+    } else {
+      channel.flipLayerV();
+    }
+  }
+
+  void _rotate90CW() {
+    if (_isMulti) {
+      channel.applyMultiLayerSimpleTransform(
+        layerIds: selectedLayerIds, operation: 'rotate90CW');
+    } else {
+      channel.rotateLayer90CW();
+    }
+  }
+
+  void _scale(double sx, double sy) {
+    if (_isMulti) {
+      channel.applyPreviewTransform(
+        layerIds: selectedLayerIds, scaleX: sx, scaleY: sy);
+    } else {
+      channel.transformLayer(scaleX: sx, scaleY: sy);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -18,9 +62,27 @@ class TransformPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 10, 14, 6),
-            child: Text('変形', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
+            child: Row(
+              children: [
+                const Text('変形', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
+                if (_isMulti) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: C.accent.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      '${selectedLayerIds.length}レイヤー',
+                      style: TextStyle(color: C.accent, fontSize: 10, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
 
           // 反転
@@ -36,7 +98,7 @@ class TransformPanel extends StatelessWidget {
                   child: _TransformButton(
                     icon: Icons.flip_rounded,
                     label: '左右',
-                    onTap: channel.flipLayerH,
+                    onTap: _flipH,
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -44,7 +106,7 @@ class TransformPanel extends StatelessWidget {
                   child: _TransformButton(
                     icon: Icons.flip_rounded,
                     label: '上下',
-                    onTap: channel.flipLayerV,
+                    onTap: _flipV,
                     rotateIcon: true,
                   ),
                 ),
@@ -67,7 +129,7 @@ class TransformPanel extends StatelessWidget {
                   child: _TransformButton(
                     icon: Icons.rotate_90_degrees_cw_rounded,
                     label: '90° 右',
-                    onTap: channel.rotateLayer90CW,
+                    onTap: _rotate90CW,
                   ),
                 ),
               ],
@@ -89,7 +151,7 @@ class TransformPanel extends StatelessWidget {
                   child: _TransformButton(
                     icon: Icons.zoom_in_rounded,
                     label: '150%',
-                    onTap: () => channel.transformLayer(scaleX: 1.5, scaleY: 1.5),
+                    onTap: () => _scale(1.5, 1.5),
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -97,7 +159,7 @@ class TransformPanel extends StatelessWidget {
                   child: _TransformButton(
                     icon: Icons.zoom_out_rounded,
                     label: '50%',
-                    onTap: () => channel.transformLayer(scaleX: 0.5, scaleY: 0.5),
+                    onTap: () => _scale(0.5, 0.5),
                   ),
                 ),
               ],
@@ -121,7 +183,7 @@ class TransformPanel extends StatelessWidget {
                       child: _TransformButton(
                         icon: Icons.open_with_rounded,
                         label: 'ユニフォーム',
-                        onTap: () => channel.transformLayer(scaleX: 1.0, scaleY: 1.0),
+                        onTap: () => _scale(1.0, 1.0),
                       ),
                     ),
                   ],

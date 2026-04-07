@@ -339,6 +339,28 @@ class PaintChannel {
   Future<void> meshWarpLayer(int gridW, int gridH, List<double> nodes) =>
       _method.invokeMethod('meshWarpLayer', {'gridW': gridW, 'gridH': gridH, 'nodes': nodes});
 
+  // ─── 複数レイヤー一括変形 ───────────────────────────────
+
+  /// 複数レイヤーに自由変形を一括適用（プレビュー確定時）
+  Future<void> applyPreviewTransform({
+    required List<int> layerIds,
+    double scaleX = 1, double scaleY = 1,
+    double angleDeg = 0,
+    double translateX = 0, double translateY = 0,
+  }) => _method.invokeMethod('applyPreviewTransform', {
+    'layerIds': layerIds,
+    'scaleX': scaleX, 'scaleY': scaleY, 'angleDeg': angleDeg,
+    'translateX': translateX, 'translateY': translateY,
+  });
+
+  /// 複数レイヤーに反転・回転を一括適用
+  Future<void> applyMultiLayerSimpleTransform({
+    required List<int> layerIds,
+    required String operation,
+  }) => _method.invokeMethod('applyMultiLayerSimpleTransform', {
+    'layerIds': layerIds, 'operation': operation,
+  });
+
   /// リキファイ開始 (Undo スナップショット)
   Future<void> beginLiquify() => _method.invokeMethod('beginLiquify');
 

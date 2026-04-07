@@ -1925,6 +1925,133 @@ class CanvasDocument(val width: Int, val height: Int) {
         return mask.copyOf()
     }
 
+    // ── 複数レイヤー一括変形 ──────────────────────────────────────
+
+    /**
+     * 複数レイヤーに同一の自由変形を一括適用。
+     * プレビュー→確定ワークフロー用: CPU 処理は確定時に1回のみ実行。
+     * 失敗時は全レイヤーをロールバックする。
+     * @return true=成功, false=失敗（ロールバック済み）
+     */
+    fun transformMultipleLayers(
+        layerIds: List<Int>,
+        centerX: Float, centerY: Float,
+        scaleX: Float, scaleY: Float,
+        angleDeg: Float,
+        translateX: Float, translateY: Float,
+    ): Boolean = lock.withLock {
+        forceEndStrokeIfNeeded()
+        require(layerIds.isNotEmpty()) { "layerIds must not be empty" }
+
+        val selMask = getSelectionMaskForTransform()
+        // Undo スナップショットを全レイヤー分取得
+        val layers = layerIds.mapNotNull { id -> _layers.find { it.id == id } }
+        if (layers.isEmpty()) return false
+
+        // 全レイヤーの Undo スナップショット
+        for (layer in layers) {
+            pushUndoTileDelta(layer)
+        }
+
+        try {
+            for (layer in layers) {
+                val originalPixels = if (selectionManager.hasSelection) {
+                    layer.content.toPixelArray()
+                } else null
+
+                TransformManager.freeTransform(
+                    layer.content, centerX, centerY,
+                    scaleX, scaleY, angleDeg,
+                    translateX, translateY, selMask
+                )
+
+                if (originalPixels != null) {
+                    restoreOutsideSelection(layer.content, originalPixels)
+                }
+            }
+            dirtyTracker.markFullRebuild()
+            PaintDebug.d(PaintDebug.Layer) {
+                "[Transform] multiLayerTransform layers=${layerIds.size} " +
+                "sx=$scaleX sy=$scaleY angle=$angleDeg tx=$translateX ty=$translateY"
+            }
+            return true
+        } catch (e: Exception) {
+            PaintDebug.assertFail("[Transform] multiLayerTransform failed: ${e.message}")
+            // ロールバック: Undo スタックから復元（逆順で取り出し）
+            for (i in layers.indices.reversed()) {
+                if (undoStack.isNotEmpty()) {
+                    val entry = undoStack.removeLast()
+                    if (entry is UndoEntry.TileDelta) {
+                        val layer = _layers.find { it.id == entry.layerId } ?: continue
+                        // スナップショットのタイルを直接復元
+                        for (j in layer.content.tiles.indices) {
+                            layer.content.tiles[j]?.decRef()
+                            val snapTile = entry.snapshots[j]
+                            layer.content.tiles[j] = snapTile  // 所有権移転（incRef 不要）
+                        }
+                    }
+                }
+            }
+            dirtyTracker.markFullRebuild()
+            return false
+        }
+    }
+
+    /**
+     * 複数レイヤーに反転・回転を一括適用。
+     * @param operation "flipH", "flipV", "rotate90CW"
+     */
+    fun transformMultipleLayersSimple(
+        layerIds: List<Int>,
+        operation: String,
+    ): Boolean = lock.withLock {
+        forceEndStrokeIfNeeded()
+        require(layerIds.isNotEmpty()) { "layerIds must not be empty" }
+
+        val selMask = getSelectionMaskForTransform()
+        val layers = layerIds.mapNotNull { id -> _layers.find { it.id == id } }
+        if (layers.isEmpty()) return false
+
+        for (layer in layers) {
+            pushUndoTileDelta(layer)
+        }
+
+        try {
+            for (layer in layers) {
+                applyTransformWithSelection(layer) {
+                    when (operation) {
+                        "flipH" -> TransformManager.flipHorizontal(layer.content, selMask)
+                        "flipV" -> TransformManager.flipVertical(layer.content, selMask)
+                        "rotate90CW" -> TransformManager.rotate90CW(layer.content, selMask)
+                        else -> throw IllegalArgumentException("Unknown operation: $operation")
+                    }
+                }
+            }
+            dirtyTracker.markFullRebuild()
+            PaintDebug.d(PaintDebug.Layer) {
+                "[Transform] multiLayerSimple op=$operation layers=${layerIds.size}"
+            }
+            return true
+        } catch (e: Exception) {
+            PaintDebug.assertFail("[Transform] multiLayerSimple failed: ${e.message}")
+            for (i in layers.indices.reversed()) {
+                if (undoStack.isNotEmpty()) {
+                    val entry = undoStack.removeLast()
+                    if (entry is UndoEntry.TileDelta) {
+                        val layer = _layers.find { it.id == entry.layerId } ?: continue
+                        for (j in layer.content.tiles.indices) {
+                            layer.content.tiles[j]?.decRef()
+                            val snapTile = entry.snapshots[j]
+                            layer.content.tiles[j] = snapTile
+                        }
+                    }
+                }
+            }
+            dirtyTracker.markFullRebuild()
+            return false
+        }
+    }
+
     // ── 図形描画 ────────────────────────────────────────────────
 
     fun drawShape(
