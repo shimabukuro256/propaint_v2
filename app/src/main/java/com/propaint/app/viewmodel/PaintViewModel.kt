@@ -893,11 +893,11 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                         _magnetPoints.add(tapX to tapY)
                         PaintDebug.d(PaintDebug.Input) { "[Magnet] start anchor set at ($tapX, $tapY)" }
                     } else {
-                        // 終点が開始点に近い（30px以内）か判定 → 自動確定
+                        // 終点が開始点に近い（40px以内）か判定 → 自動確定
                         val start = _magnetStart!!
                         val distToStart = hypot((tapX - start.first).toDouble(), (tapY - start.second).toDouble())
 
-                        if (distToStart < 30.0 && _magnetPoints.size >= 3) {
+                        if (distToStart < 40.0 && _magnetPoints.size >= 2) {
                             // パスを開始点に閉じて確定
                             val lastPoint = _magnetPoints.lastOrNull()
                             if (lastPoint != null) {
@@ -910,7 +910,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                             _magnetStart = null
                             _magnetPoints.clear()
                             _magnetPath.clear()
-                            PaintDebug.d(PaintDebug.Input) { "[Magnet] selection finalized (auto-closed)" }
+                            PaintDebug.d(PaintDebug.Input) { "[Magnet] selection finalized (auto-closed) with ${_magnetPoints.size} anchors, dist=$distToStart" }
                         } else {
                             // 新規アンカーポイント追加 + 前のアンカーから現在位置へエッジ追跡
                             val lastPoint = _magnetPoints.lastOrNull()
@@ -918,7 +918,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                                 _magnetPath.addAll(traceMagnetPath(surface, lastPoint.first, lastPoint.second, tapX, tapY))
                             }
                             _magnetPoints.add(tapX to tapY)
-                            PaintDebug.d(PaintDebug.Input) { "[Magnet] anchor added at ($tapX, $tapY), anchors=${_magnetPoints.size}" }
+                            val distFromStart = hypot((tapX - start.first).toDouble(), (tapY - start.second).toDouble())
+                            PaintDebug.d(PaintDebug.Input) { "[Magnet] anchor added at ($tapX, $tapY), anchors=${_magnetPoints.size}, distFromStart=$distFromStart" }
                         }
                     }
                 }

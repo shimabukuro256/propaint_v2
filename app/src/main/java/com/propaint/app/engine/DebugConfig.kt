@@ -8,7 +8,11 @@ import android.util.Log
  */
 object DebugConfig {
     @Volatile
-    var enableDiagnosticLog: Boolean = false
+    var enableDiagnosticLog: Boolean = true  // デバッグ有効
+
+    init {
+        Log.d("DebugConfig", "PaintDebug diagnostic log ENABLED")
+    }
 }
 
 /** PaintDebug タグ体系。CLAUDE.md 準拠。 */
