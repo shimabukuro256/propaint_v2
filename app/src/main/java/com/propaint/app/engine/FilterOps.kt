@@ -329,6 +329,25 @@ object FilterOps {
         }
     }
 
+    // ── 色反転 ────────────────────────────────────────────────
+
+    /**
+     * 色反転フィルタ。RGB を反転し、アルファは保持。
+     * premultiplied 空間で処理: unpremultiply → 反転 → premultiply。
+     */
+    fun applyInvertColors(pixels: IntArray) {
+        for (i in pixels.indices) {
+            val c = pixels[i]; val a = PixelOps.alpha(c); if (a == 0) continue
+            val up = PixelOps.unpremultiply(c)
+            pixels[i] = PixelOps.premultiply(PixelOps.pack(
+                a,
+                255 - PixelOps.red(up),
+                255 - PixelOps.green(up),
+                255 - PixelOps.blue(up),
+            ))
+        }
+    }
+
     // ── グラデーションマップ ───────────────────────────────────
 
     /**
@@ -348,6 +367,115 @@ object FilterOps {
                 a, PixelOps.red(mapUp), PixelOps.green(mapUp), PixelOps.blue(mapUp)
             ))
         }
+    }
+
+    // ── モーションブラー ──────────────────────────────────────
+
+    /**
+     * モーションブラー。指定角度・距離に沿って1Dボックスブラー。
+     * @param angleDeg ぶれの角度（度数法、0=水平右方向）
+     * @param distance ぶれの距離（ピクセル、1以上）
+     */
+    fun applyMotionBlur(pixels: IntArray, w: Int, h: Int, angleDeg: Float, distance: Int) {
+        val safeDist = distance.coerceIn(1, 200)
+        val rad = Math.toRadians(angleDeg.toDouble())
+        val dx = cos(rad).toFloat()
+        val dy = sin(rad).toFloat()
+        val halfDist = safeDist / 2
+        val samples = safeDist
+        val invSamples = 1f / samples
+
+        val output = pixels.copyOf()
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var rAcc = 0f; var gAcc = 0f; var bAcc = 0f; var aAcc = 0f
+                for (s in 0 until samples) {
+                    val t = s - halfDist
+                    val sx = (x + dx * t).toInt().coerceIn(0, w - 1)
+                    val sy = (y + dy * t).toInt().coerceIn(0, h - 1)
+                    val c = pixels[sy * w + sx]
+                    aAcc += PixelOps.alpha(c)
+                    rAcc += PixelOps.red(c)
+                    gAcc += PixelOps.green(c)
+                    bAcc += PixelOps.blue(c)
+                }
+                val ca = (aAcc * invSamples + 0.5f).toInt().coerceIn(0, 255)
+                output[y * w + x] = PixelOps.pack(
+                    ca,
+                    (rAcc * invSamples + 0.5f).toInt().coerceIn(0, ca),
+                    (gAcc * invSamples + 0.5f).toInt().coerceIn(0, ca),
+                    (bAcc * invSamples + 0.5f).toInt().coerceIn(0, ca),
+                )
+            }
+        }
+
+        System.arraycopy(output, 0, pixels, 0, pixels.size)
+    }
+
+    // ── グラデーション描画 ──────────────────────────────────────
+
+    /**
+     * 線形グラデーションを描画。始点→終点に沿って色を補間。
+     * 既存ピクセルに SrcOver で合成。
+     * @param startColor, endColor premultiplied ARGB
+     */
+    fun applyLinearGradient(
+        pixels: IntArray, w: Int, h: Int,
+        startX: Float, startY: Float, endX: Float, endY: Float,
+        startColor: Int, endColor: Int,
+    ) {
+        val dx = endX - startX; val dy = endY - startY
+        val lenSq = dx * dx + dy * dy
+        if (lenSq < 1e-6f) return  // 始点と終点が同じ → 何もしない
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val t = (((x - startX) * dx + (y - startY) * dy) / lenSq).coerceIn(0f, 1f)
+                val gradColor = lerpColor(startColor, endColor, t)
+                if (PixelOps.alpha(gradColor) == 0) continue
+                val i = y * w + x
+                pixels[i] = PixelOps.blendSrcOver(pixels[i], gradColor)
+            }
+        }
+    }
+
+    /**
+     * 放射状グラデーションを描画。中心→外周に沿って色を補間。
+     * 既存ピクセルに SrcOver で合成。
+     * @param startColor 中心の色 (premultiplied ARGB)
+     * @param endColor 外周の色 (premultiplied ARGB)
+     */
+    fun applyRadialGradient(
+        pixels: IntArray, w: Int, h: Int,
+        centerX: Float, centerY: Float, radius: Float,
+        startColor: Int, endColor: Int,
+    ) {
+        require(radius > 0f) { "gradient radius must be > 0" }
+        val invR = 1f / radius
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val dx = x - centerX; val dy = y - centerY
+                val dist = sqrt(dx * dx + dy * dy)
+                val t = (dist * invR).coerceIn(0f, 1f)
+                val gradColor = lerpColor(startColor, endColor, t)
+                if (PixelOps.alpha(gradColor) == 0) continue
+                val i = y * w + x
+                pixels[i] = PixelOps.blendSrcOver(pixels[i], gradColor)
+            }
+        }
+    }
+
+    /** premultiplied ARGB の線形補間 */
+    private fun lerpColor(c0: Int, c1: Int, t: Float): Int {
+        val it = 1f - t
+        return PixelOps.pack(
+            (PixelOps.alpha(c0) * it + PixelOps.alpha(c1) * t + 0.5f).toInt().coerceIn(0, 255),
+            (PixelOps.red(c0) * it + PixelOps.red(c1) * t + 0.5f).toInt().coerceIn(0, 255),
+            (PixelOps.green(c0) * it + PixelOps.green(c1) * t + 0.5f).toInt().coerceIn(0, 255),
+            (PixelOps.blue(c0) * it + PixelOps.blue(c1) * t + 0.5f).toInt().coerceIn(0, 255),
+        )
     }
 
     // ── ヘルパー ──────────────────────────────────────────────

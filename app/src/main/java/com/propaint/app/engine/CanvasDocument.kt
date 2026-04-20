@@ -90,10 +90,13 @@ class CanvasDocument(val width: Int, val height: Int) {
     private var filterPreviewBuf: IntArray? = null
     private var filterPreviewBuf2: IntArray? = null
 
-    // ピクセルコピー変形（Word/Excel風）
+    // ピクセルコピー変形（Word/Excel風） ── 単一レイヤー互換
     private var pixelCopyBuffer: IntArray? = null
     private var pixelCopyBounds: android.graphics.Rect? = null
     private var pixelCopyOriginalPixels: IntArray? = null // キャンセル用のオリジナル保存
+    // ── 多レイヤー浮遊選択 (Phase 3.5) ──
+    private var pixelCopyLayerIds: List<Int>? = null
+    private var pixelCopyMultiBuffers: Map<Int, IntArray>? = null  // layerId → pixels
 
     // ストローク中フラグ
     private var strokeInProgress = false
@@ -130,6 +133,20 @@ class CanvasDocument(val width: Int, val height: Int) {
         dirtyTracker.markFullRebuild(); l
     }
 
+    /**
+     * 既存の Layer オブジェクトを追加（LayerTree との連携用）。
+     * TiledSurface は既に作成済みのものを使用する。
+     */
+    fun addLayerDirect(layer: Layer, atIndex: Int = _layers.size): Unit = lock.withLock {
+        forceEndStrokeIfNeeded()
+        layer.displayOrder = nextDisplayOrder++
+        _layers.add(atIndex.coerceIn(0, _layers.size), layer)
+        if (layer.id >= nextLayerId) nextLayerId = layer.id + 1
+        if (activeLayerId < 0) activeLayerId = layer.id
+        PaintDebug.d(PaintDebug.Layer) { "[addLayerDirect] id=${layer.id} name=${layer.name} total=${_layers.size}" }
+        dirtyTracker.markFullRebuild()
+    }
+
     fun removeLayer(layerId: Int): Boolean = lock.withLock {
         if (_layers.size <= 1) return false
         forceEndStrokeIfNeeded()
@@ -161,6 +178,18 @@ class CanvasDocument(val width: Int, val height: Int) {
         forceEndStrokeIfNeeded()
         val l = _layers.removeAt(from); _layers.add(to, l)
         dirtyTracker.markFullRebuild()
+    }
+
+    /**
+     * _layers を displayOrder でソートする。
+     * LayerTree からの同期後に呼び出し、描画順序を正しくする。
+     */
+    fun sortLayersByDisplayOrder() = lock.withLock {
+        _layers.sortBy { it.displayOrder }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) {
+            "[sortLayersByDisplayOrder] sorted ${_layers.size} layers"
+        }
     }
 
     fun setLayerOpacity(id: Int, v: Float) = lock.withLock {
@@ -1489,6 +1518,17 @@ class CanvasDocument(val width: Int, val height: Int) {
     fun setLayerGroup(layerId: Int, groupId: Int) = lock.withLock {
         val layer = _layers.find { it.id == layerId } ?: return
         layer.groupId = groupId
+        PaintDebug.d(PaintDebug.Layer) { "[setLayerGroup] layerId=$layerId groupId=$groupId" }
+        dirtyTracker.markFullRebuild()
+    }
+
+    /**
+     * グループ情報のみを削除（子レイヤーは削除しない）。
+     * LayerTree との連携用: LayerTree 側で子レイヤーの削除を管理する場合に使用。
+     */
+    fun removeLayerGroupInfo(groupId: Int) = lock.withLock {
+        _layerGroups.remove(groupId)
+        PaintDebug.d(PaintDebug.Layer) { "[removeLayerGroupInfo] id=$groupId" }
     }
 
     fun setGroupVisibility(groupId: Int, visible: Boolean) = lock.withLock {
@@ -1502,29 +1542,17 @@ class CanvasDocument(val width: Int, val height: Int) {
     }
 
     fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int) = lock.withLock {
-        if (!_layerGroups.containsKey(fromGroupId) || !_layerGroups.containsKey(toGroupId)) return
+        val fromGroup = _layerGroups[fromGroupId] ?: return
+        val toGroup = _layerGroups[toGroupId] ?: return
         if (fromGroupId == toGroupId) return
 
-        val groupList = _layerGroups.keys.toMutableList()
-        val fromIdx = groupList.indexOf(fromGroupId)
-        val toIdx = groupList.indexOf(toGroupId)
+        // displayOrder を交換（UI表示順はdisplayOrderで決まる）
+        val tmpOrder = fromGroup.displayOrder
+        fromGroup.displayOrder = toGroup.displayOrder
+        toGroup.displayOrder = tmpOrder
 
-        if (fromIdx < 0 || toIdx < 0) return
-
-        // fromGroupId を削除して toIdx の位置に再挿入
-        groupList.removeAt(fromIdx)
-        val newToIdx = if (fromIdx < toIdx) toIdx - 1 else toIdx
-        groupList.add(newToIdx, fromGroupId)
-
-        // LinkedHashMap を再構築
-        val newGroups = LinkedHashMap<Int, LayerGroupInfo>()
-        for (id in groupList) {
-            newGroups[id] = _layerGroups[id]!!
-        }
-
-        _layerGroups.clear()
-        _layerGroups.putAll(newGroups)
-        PaintDebug.d(PaintDebug.Layer) { "[reorderLayerGroup] from=$fromGroupId to=$toGroupId" }
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) { "[reorderLayerGroup] from=$fromGroupId(order=${fromGroup.displayOrder}) to=$toGroupId(order=${toGroup.displayOrder})" }
     }
 
     // ── レイヤーマスク ──────────────────────────────────────────
@@ -2230,6 +2258,66 @@ class CanvasDocument(val width: Int, val height: Int) {
         dirtyTracker.markFullRebuild()
     }
 
+    /**
+     * 線形グラデーションをレイヤーに描画。
+     * @param startColor, endColor unpremultiplied ARGB (0xAARRGGBB)
+     */
+    fun applyLinearGradient(
+        layerId: Int,
+        startX: Float, startY: Float, endX: Float, endY: Float,
+        startColor: Int, endColor: Int,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val premStart = PixelOps.premultiply(startColor)
+        val premEnd = PixelOps.premultiply(endColor)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyLinearGradient(pixels, width, height, startX, startY, endX, endY, premStart, premEnd)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    /**
+     * 放射状グラデーションをレイヤーに描画。
+     * @param startColor 中心色, endColor 外周色 (unpremultiplied ARGB)
+     */
+    fun applyRadialGradient(
+        layerId: Int,
+        centerX: Float, centerY: Float, radius: Float,
+        startColor: Int, endColor: Int,
+    ) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        val premStart = PixelOps.premultiply(startColor)
+        val premEnd = PixelOps.premultiply(endColor)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyRadialGradient(pixels, width, height, centerX, centerY, radius, premStart, premEnd)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyInvertColors(layerId: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyInvertColors(pixels)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
+    fun applyMotionBlur(layerId: Int, angleDeg: Float, distance: Int) = lock.withLock {
+        forceEndStrokeIfNeeded()
+        val layer = _layers.find { it.id == layerId } ?: return
+        pushUndoTileDelta(layer)
+        applyFilterWithSelection(layer) { pixels ->
+            FilterOps.applyMotionBlur(pixels, width, height, angleDeg, distance)
+        }
+        dirtyTracker.markFullRebuild()
+    }
+
     fun applyGradientMap(layerId: Int, gradientLut: IntArray) = lock.withLock {
         forceEndStrokeIfNeeded()
         val layer = _layers.find { it.id == layerId } ?: return
@@ -2246,55 +2334,99 @@ class CanvasDocument(val width: Int, val height: Int) {
      * 選択範囲内のピクセルをコピーしバッファに保存、元のピクセルを削除（切り取り）
      * @return バウンディングボックス {left, top, right, bottom} を Map で返す
      */
-    fun startPixelCopy(layerId: Int): android.graphics.Rect = lock.withLock {
+    /**
+     * ピクセルコピー（浮遊選択層）を開始。
+     * @param layerIds 対象レイヤーID。複数指定で多レイヤー浮遊選択。
+     */
+    fun startPixelCopy(layerIds: List<Int>): android.graphics.Rect = lock.withLock {
         forceEndStrokeIfNeeded()
-        val layer = _layers.find { it.id == layerId } ?: return android.graphics.Rect()
         val boundsArray = selectionManager.getBounds() ?: return android.graphics.Rect()
-
-        pushUndoTileDelta(layer)
-
-        // boundsArray = [left, top, right, bottom]
-        val left = boundsArray[0]
-        val top = boundsArray[1]
-        val right = boundsArray[2]
-        val bottom = boundsArray[3]
-
-        // バウンディングボックス内のピクセルをコピー
-        val copyWidth = right - left
-        val copyHeight = bottom - top
+        val left = boundsArray[0]; val top = boundsArray[1]
+        val right = boundsArray[2]; val bottom = boundsArray[3]
+        val copyWidth = right - left; val copyHeight = bottom - top
+        require(copyWidth > 0 && copyHeight > 0) { "selection bounds empty" }
         val totalPixels = copyWidth * copyHeight
-        pixelCopyBuffer = IntArray(totalPixels)
-        pixelCopyOriginalPixels = IntArray(totalPixels) // キャンセル用
 
-        var pixIdx = 0
-        for (ty in top until bottom) {
-            for (tx in left until right) {
-                val tileX = tx / 64
-                val tileY = ty / 64
-                val inTileX = tx % 64
-                val inTileY = ty % 64
-                val tileIndex = tileY * ((width + 63) / 64) + tileX
-                val tile = layer.content.tiles.getOrNull(tileIndex)
-                val pixelVal = tile?.pixels?.get(inTileY * 64 + inTileX) ?: 0
-                pixelCopyBuffer!![pixIdx] = pixelVal
-                pixelCopyOriginalPixels!![pixIdx] = pixelVal
-                pixIdx++
+        val layers = layerIds.mapNotNull { id -> _layers.find { it.id == id } }
+        if (layers.isEmpty()) return android.graphics.Rect()
+
+        // 全対象レイヤーの Undo スナップショット
+        for (layer in layers) pushUndoTileDelta(layer)
+
+        // 選択マスクを取得: null でない前提 (getBounds で null チェック済み)
+        val selMask = selectionManager.mask
+        val canvasW = width
+
+        if (layers.size == 1) {
+            // ── 単一レイヤーモード（既存互換）──
+            val layer = layers[0]
+            pixelCopyBuffer = IntArray(totalPixels)
+            pixelCopyOriginalPixels = IntArray(totalPixels)
+            pixelCopyLayerIds = layerIds
+            pixelCopyMultiBuffers = null
+
+            var pixIdx = 0
+            for (ty in top until bottom) {
+                for (tx in left until right) {
+                    val tileX = tx / Tile.SIZE; val tileY = ty / Tile.SIZE
+                    val inTileX = tx % Tile.SIZE; val inTileY = ty % Tile.SIZE
+                    val tileIndex = tileY * layer.content.tilesX + tileX
+                    val tile = layer.content.tiles.getOrNull(tileIndex)
+                    val rawPixel = tile?.pixels?.get(inTileY * Tile.SIZE + inTileX) ?: 0
+                    // 選択マスクでピクセルをモジュレート（不透明選択=そのまま / 半透明=アルファ減衰 / 未選択=透明）
+                    val maskVal = selMask?.get(ty * canvasW + tx)?.toInt()?.and(0xFF) ?: 255
+                    val pixelVal = applyMaskToPremul(rawPixel, maskVal)
+                    pixelCopyBuffer!![pixIdx] = pixelVal
+                    pixelCopyOriginalPixels!![pixIdx] = pixelVal
+                    pixIdx++
+                }
             }
+            deleteSelection(layer.id)
+        } else {
+            // ── 多レイヤーモード（Phase 3.5）──
+            val multiBuffers = HashMap<Int, IntArray>(layers.size)
+            for (layer in layers) {
+                val buf = IntArray(totalPixels)
+                var pixIdx = 0
+                for (ty in top until bottom) {
+                    for (tx in left until right) {
+                        val tileX = tx / Tile.SIZE; val tileY = ty / Tile.SIZE
+                        val inTileX = tx % Tile.SIZE; val inTileY = ty % Tile.SIZE
+                        val tileIndex = tileY * layer.content.tilesX + tileX
+                        val tile = layer.content.tiles.getOrNull(tileIndex)
+                        val rawPixel = tile?.pixels?.get(inTileY * Tile.SIZE + inTileX) ?: 0
+                        val maskVal = selMask?.get(ty * canvasW + tx)?.toInt()?.and(0xFF) ?: 255
+                        buf[pixIdx] = applyMaskToPremul(rawPixel, maskVal)
+                        pixIdx++
+                    }
+                }
+                multiBuffers[layer.id] = buf
+                deleteSelection(layer.id)
+            }
+            // 合成バッファ（Flutter 表示用: 全レイヤーを合成）
+            pixelCopyBuffer = IntArray(totalPixels)
+            for (layer in layers) {
+                val buf = multiBuffers[layer.id]!!
+                val op255 = (layer.opacity * 255f).toInt().coerceIn(0, 255)
+                PixelOps.compositeLayer(pixelCopyBuffer!!, buf, op255, layer.blendMode)
+            }
+            pixelCopyOriginalPixels = pixelCopyBuffer!!.copyOf()
+            pixelCopyLayerIds = layerIds
+            pixelCopyMultiBuffers = multiBuffers
         }
 
-        // オリジナルのピクセルを削除（選択範囲を削除）
-        deleteSelection(layerId)
         pixelCopyBounds = android.graphics.Rect(left, top, right, bottom)
         dirtyTracker.markFullRebuild()
-
+        PaintDebug.d(PaintDebug.Layer) {
+            "[PixelCopy] start layers=${layerIds.size} bounds=[$left,$top,$right,$bottom]"
+        }
         return pixelCopyBounds!!
     }
 
     /**
-     * ピクセルコピーを確定（変形後のピクセルをレイヤーに貼り付け）
-     * @param x, y: 左上位置
-     * @param scaleX, scaleY: スケール倍率
-     * @param rotation: 回転角度（度数法）
+     * ピクセルコピーを確定（変形後のピクセルを各レイヤーに貼り付け）
+     * 多レイヤーモード: 各レイヤーの個別バッファから復元。
+     * 単一レイヤーモード: 合成バッファからアクティブレイヤーに貼り付け。
      */
     fun applyPixelCopy(
         layerId: Int,
@@ -2304,86 +2436,90 @@ class CanvasDocument(val width: Int, val height: Int) {
         scaleY: Float = 1f,
         rotation: Float = 0f,
     ) = lock.withLock {
-        val layer = _layers.find { it.id == layerId } ?: return
-        val buffer = pixelCopyBuffer ?: return
         val bounds = pixelCopyBounds ?: return
-
         val copyWidth = bounds.right - bounds.left
         val copyHeight = bounds.bottom - bounds.top
 
-        // スケール・回転に対応
+        val multiBuffers = pixelCopyMultiBuffers
+        val layerIds = pixelCopyLayerIds
+
+        if (multiBuffers != null && layerIds != null && layerIds.size > 1) {
+            // ── 多レイヤーモード: 各レイヤーに個別復元 ──
+            for (lid in layerIds) {
+                val layer = _layers.find { it.id == lid } ?: continue
+                val buf = multiBuffers[lid] ?: continue
+                writeBufferToLayer(layer, buf, x, y, copyWidth, copyHeight, scaleX, scaleY, rotation)
+            }
+        } else {
+            // ── 単一レイヤーモード ──
+            val layer = _layers.find { it.id == layerId } ?: return
+            val buffer = pixelCopyBuffer ?: return
+            writeBufferToLayer(layer, buffer, x, y, copyWidth, copyHeight, scaleX, scaleY, rotation)
+        }
+
+        clearPixelCopyState()
+        dirtyTracker.markFullRebuild()
+        PaintDebug.d(PaintDebug.Layer) {
+            "[PixelCopy] apply x=$x y=$y sx=$scaleX sy=$scaleY rot=$rotation"
+        }
+    }
+
+    /** バッファのピクセルをレイヤーに書き込む（変形付き） */
+    private fun writeBufferToLayer(
+        layer: Layer, buffer: IntArray,
+        x: Int, y: Int,
+        copyWidth: Int, copyHeight: Int,
+        scaleX: Float, scaleY: Float, rotation: Float,
+    ) {
         if (scaleX == 1f && scaleY == 1f && rotation == 0f) {
-            // 高速パス：変形なし
+            // 高速パス: 変形なし
             var pixIdx = 0
             for (dy in 0 until copyHeight) {
                 for (dx in 0 until copyWidth) {
-                    val pixelVal = buffer[pixIdx]
-                    val px = x + dx
-                    val py = y + dy
-
-                    if (px in 0 until width && py in 0 until height) {
-                        val tileX = px / 64
-                        val tileY = py / 64
-                        val inTileX = px % 64
-                        val inTileY = py % 64
-                        val tileIndex = tileY * ((width + 63) / 64) + tileX
-                        val tile = layer.content.tiles.getOrNull(tileIndex)
-                        tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
-                    }
-                    pixIdx++
+                    val pixelVal = buffer[pixIdx++]
+                    if (pixelVal == 0) continue
+                    val px = x + dx; val py = y + dy
+                    if (px !in 0 until width || py !in 0 until height) continue
+                    val tile = layer.content.getOrCreateMutable(px / Tile.SIZE, py / Tile.SIZE)
+                    tile.pixels[(py % Tile.SIZE) * Tile.SIZE + (px % Tile.SIZE)] = pixelVal
                 }
             }
         } else {
-            // 変形処理：ソース座標を逆変換してサンプリング
+            // 変形処理: 逆変換サンプリング
             val cosA = kotlin.math.cos(kotlin.math.PI * rotation / 180.0).toFloat()
             val sinA = kotlin.math.sin(kotlin.math.PI * rotation / 180.0).toFloat()
-            val centerX = copyWidth / 2f
-            val centerY = copyHeight / 2f
+            val centerX = copyWidth / 2f; val centerY = copyHeight / 2f
+            val dstW = (copyWidth * scaleX).toInt().coerceAtLeast(1)
+            val dstH = (copyHeight * scaleY).toInt().coerceAtLeast(1)
 
-            for (dy in 0 until (copyHeight * scaleY).toInt()) {
-                for (dx in 0 until (copyWidth * scaleX).toInt()) {
-                    // デスト座標 → ソース座標への逆変換
-                    val relX = dx / scaleX - centerX
-                    val relY = dy / scaleY - centerY
-
-                    // 回転解除
-                    val srcRelX = relX * cosA + relY * sinA
-                    val srcRelY = -relX * sinA + relY * cosA
-                    val srcX = srcRelX + centerX
-                    val srcY = srcRelY + centerY
-
-                    if (srcX >= 0 && srcX < copyWidth && srcY >= 0 && srcY < copyHeight) {
-                        // バイリニア補間でソースピクセルをサンプリング
-                        val pixelVal = samplePixelBilinear(buffer, copyWidth, copyHeight, srcX, srcY)
-                        val px = x + dx
-                        val py = y + dy
-
-                        if (px in 0 until width && py in 0 until height) {
-                            val tileX = px / 64
-                            val tileY = py / 64
-                            val inTileX = px % 64
-                            val inTileY = py % 64
-                            val tileIndex = tileY * ((width + 63) / 64) + tileX
-                            val tile = layer.content.tiles.getOrNull(tileIndex)
-                            tile?.pixels?.set(inTileY * 64 + inTileX, pixelVal)
-                        }
-                    }
+            for (dy in 0 until dstH) {
+                for (dx in 0 until dstW) {
+                    val relX = dx / scaleX - centerX; val relY = dy / scaleY - centerY
+                    val srcX = relX * cosA + relY * sinA + centerX
+                    val srcY = -relX * sinA + relY * cosA + centerY
+                    if (srcX < 0 || srcX >= copyWidth || srcY < 0 || srcY >= copyHeight) continue
+                    val pixelVal = samplePixelBilinear(buffer, copyWidth, copyHeight, srcX, srcY)
+                    if (pixelVal == 0) continue
+                    val px = x + dx; val py = y + dy
+                    if (px !in 0 until width || py !in 0 until height) continue
+                    val tile = layer.content.getOrCreateMutable(px / Tile.SIZE, py / Tile.SIZE)
+                    tile.pixels[(py % Tile.SIZE) * Tile.SIZE + (px % Tile.SIZE)] = pixelVal
                 }
             }
         }
-
-        pixelCopyBuffer = null
-        pixelCopyBounds = null
-        pixelCopyOriginalPixels = null
-        dirtyTracker.markFullRebuild()
     }
 
-    /** ピクセルコピーをキャンセル（オリジナルピクセルを復元） */
+    /** ピクセルコピーをキャンセル（Undo で復元） */
     fun cancelPixelCopy() = lock.withLock {
-        // Undo/Redo で対応可能なため、ここでは単にバッファをクリア
+        clearPixelCopyState()
+    }
+
+    private fun clearPixelCopyState() {
         pixelCopyBuffer = null
         pixelCopyBounds = null
         pixelCopyOriginalPixels = null
+        pixelCopyLayerIds = null
+        pixelCopyMultiBuffers = null
     }
 
     /** バイリニア補間でピクセルをサンプリング */
@@ -2449,5 +2585,21 @@ class CanvasDocument(val width: Int, val height: Int) {
                (r.coerceIn(0, 255) shl 16) or
                (g.coerceIn(0, 255) shl 8) or
                b.coerceIn(0, 255)
+    }
+
+    /**
+     * premultiplied ARGB ピクセルを選択マスク値 [0..255] でモジュレートする。
+     * - maskVal=255: そのまま
+     * - maskVal=0:   完全透明（0）
+     * - 中間値:      全チャンネルを maskVal/255 でスケール（premul 不変）
+     */
+    private fun applyMaskToPremul(pixel: Int, maskVal: Int): Int {
+        if (maskVal <= 0) return 0
+        if (maskVal >= 255) return pixel
+        val a = PixelOps.div255(PixelOps.alpha(pixel) * maskVal)
+        val r = PixelOps.div255(PixelOps.red(pixel) * maskVal)
+        val g = PixelOps.div255(PixelOps.green(pixel) * maskVal)
+        val b = PixelOps.div255(PixelOps.blue(pixel) * maskVal)
+        return PixelOps.pack(a, r, g, b)
     }
 }

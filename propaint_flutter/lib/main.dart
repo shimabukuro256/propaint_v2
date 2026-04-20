@@ -14,7 +14,7 @@ import 'widgets/layer_panel.dart';
 import 'widgets/side_quick_bar.dart';
 import 'widgets/selection_tool_panel.dart';
 import 'widgets/transform_panel.dart';
-import 'widgets/shape_text_panel.dart';
+import 'widgets/flood_fill_panel.dart';
 import 'widgets/filter_panel.dart';
 import 'widgets/pixel_copy_overlay.dart';
 
@@ -45,7 +45,7 @@ class ProPaintApp extends StatelessWidget {
 }
 
 /// 開いているパネル
-enum PanelType { none, brush, color, layer, menu, selectionTool, transform, shapeText, filter }
+enum PanelType { none, brush, color, layer, menu, selectionTool, filter, floodFill }
 
 class PaintScaffold extends StatefulWidget {
   const PaintScaffold({super.key});
@@ -60,6 +60,9 @@ class _PaintScaffoldState extends State<PaintScaffold> {
   StreamSubscription<Map<String, dynamic>>? _stateSub;
   PanelType _openPanel = PanelType.none;
 
+  // 複数選択レイヤーID（LayerPanel から通知）
+  Set<int> _selectedLayerIds = {};
+
   // スポイトトグル用: トグル前のブラシ種別を保存
   String? _savedBrushType;
 
@@ -70,11 +73,17 @@ class _PaintScaffoldState extends State<PaintScaffold> {
   // ピクセルコピー変形のオーバーレイ状態
   Map<String, int>? _pixelCopyState; // {left, top, right, bottom}
 
+  // 塗りつぶしツールのしきい値 (0..255)。ネイティブに setFloodFillTolerance で反映
+  int _floodFillTolerance = 0;
+
   @override
   void initState() {
     super.initState();
     // ネイティブからのジェスチャ通知を受信（先に登録）
     _channel.onNativeGesture = _onNativeGesture;
+
+    // ネイティブからのエラーメッセージを受信
+    _channel.onErrorMessage = _onErrorMessage;
 
     // 物理キーボードショートカット登録
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
@@ -89,6 +98,17 @@ class _PaintScaffoldState extends State<PaintScaffold> {
   void _initializeChannels() {
     _stateSub = _channel.stateStream.listen(_onStateUpdate);
     _channel.getState().then(_onStateUpdate);
+  }
+
+  void _onErrorMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 2),
+        backgroundColor: Colors.red.shade700,
+      ),
+    );
   }
 
   @override
@@ -298,7 +318,11 @@ class _PaintScaffoldState extends State<PaintScaffold> {
             Positioned(
               top: 60,
               right: 8,
-              child: LayerPanel(state: _state, channel: _channel),
+              child: LayerPanel(
+                state: _state,
+                channel: _channel,
+                onSelectionChanged: (ids) => setState(() => _selectedLayerIds = ids),
+              ),
             ),
 
           // 選択ペン・消しパネル
@@ -316,28 +340,46 @@ class _PaintScaffoldState extends State<PaintScaffold> {
               ),
             ),
 
-          // 変形パネル
-          if (_openPanel == PanelType.transform)
-            Positioned(
-              top: 60,
-              left: 60,
-              child: TransformPanel(channel: _channel),
-            ),
-
-          // 図形・テキストパネル
-          if (_openPanel == PanelType.shapeText)
-            Positioned(
-              top: 60,
-              left: 60,
-              child: ShapeTextPanel(state: _state, channel: _channel),
-            ),
-
           // フィルターパネル
           if (_openPanel == PanelType.filter)
             Positioned(
               top: 60,
               left: 60,
-              child: FilterPanel(channel: _channel),
+              child: FilterPanel(channel: _channel, currentColor: _state.currentColor),
+            ),
+
+          // 塗りつぶしプロパティパネル（しきい値スライダ）
+          if (_openPanel == PanelType.floodFill)
+            Positioned(
+              top: 60,
+              left: 60,
+              child: FloodFillPanel(
+                channel: _channel,
+                tolerance: _floodFillTolerance,
+                onToleranceChanged: (v) {
+                  setState(() => _floodFillTolerance = v);
+                  _channel.setFloodFillTolerance(v);
+                },
+                onClose: _closePanel,
+              ),
+            ),
+
+          // 選択範囲作成時のフロート変形バー (画面下部)
+          if (_state.hasSelection || _selectedLayerIds.length >= 2)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 16,
+              child: Center(
+                child: SelectionTransformBar(
+                  channel: _channel,
+                  selectedLayerIds: _selectedLayerIds.toList(),
+                  hasSelection: _state.hasSelection,
+                  onPixelCopyStarted: (bounds) {
+                    setState(() => _pixelCopyState = bounds);
+                  },
+                ),
+              ),
             ),
 
           // スポイトモード表示
@@ -391,20 +433,53 @@ class _PaintScaffoldState extends State<PaintScaffold> {
             ),
 
           // ピクセルコピー変形オーバーレイ
+          // GL ビュー変換 (zoom/pan/rotation/fit) を反映してから描画するため Transform で包む。
+          // これがないと横向きなどレターボックス時に doc 座標=screen 座標として表示され位置ずれする。
           if (_pixelCopyState != null)
-            PixelCopyOverlay(
-              left: _pixelCopyState!['left']!,
-              top: _pixelCopyState!['top']!,
-              width: _pixelCopyState!['right']! - _pixelCopyState!['left']!,
-              height: _pixelCopyState!['bottom']! - _pixelCopyState!['top']!,
-              channel: _channel,
-              onClose: () {
-                setState(() => _pixelCopyState = null);
-              },
+            Transform(
+              transform: _buildDocToScreenMatrix(
+                _state.viewTransform,
+                MediaQuery.of(context).devicePixelRatio,
+              ),
+              child: PixelCopyOverlay(
+                left: _pixelCopyState!['left']!,
+                top: _pixelCopyState!['top']!,
+                width: _pixelCopyState!['right']! - _pixelCopyState!['left']!,
+                height: _pixelCopyState!['bottom']! - _pixelCopyState!['top']!,
+                channel: _channel,
+                onClose: () {
+                  setState(() => _pixelCopyState = null);
+                },
+              ),
             ),
         ],
       ),
     );
+  }
+
+  /// doc 座標 → screen 座標 (Flutter logical px) への Matrix4 を構築。
+  /// Kotlin 側 CanvasRenderer.buildCanvasQuadVertices と同じ変換を再現する。
+  /// surface/pan は device px なので devicePixelRatio で割って logical px に変換する。
+  Matrix4 _buildDocToScreenMatrix(Map<String, dynamic>? vt, double dpr) {
+    if (vt == null || vt.isEmpty) return Matrix4.identity();
+    final zoom = (vt['zoom'] as num?)?.toDouble() ?? 1.0;
+    final panX = ((vt['panX'] as num?)?.toDouble() ?? 0.0) / dpr;
+    final panY = ((vt['panY'] as num?)?.toDouble() ?? 0.0) / dpr;
+    final rotation = (vt['rotation'] as num?)?.toDouble() ?? 0.0;
+    final sw = ((vt['surfaceWidth'] as num?)?.toDouble() ?? 0.0) / dpr;
+    final sh = ((vt['surfaceHeight'] as num?)?.toDouble() ?? 0.0) / dpr;
+    final dw = (vt['docWidth'] as num?)?.toDouble() ?? 0.0;
+    final dh = (vt['docHeight'] as num?)?.toDouble() ?? 0.0;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return Matrix4.identity();
+    final baseScale = (sw / dw).compareTo(sh / dh) < 0 ? sw / dw : sh / dh;
+    final finalScale = baseScale * zoom;
+    final cx = sw / 2 + panX;
+    final cy = sh / 2 + panY;
+    return Matrix4.identity()
+      ..translate(cx, cy)
+      ..rotateZ(rotation)
+      ..scale(finalScale, finalScale)
+      ..translate(-dw / 2, -dh / 2);
   }
 }
 

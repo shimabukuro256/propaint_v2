@@ -24,7 +24,11 @@ class PaintState {
   final String toolMode;
   final bool isDrawing;
   final bool hasSelection;
+  final Set<int> selectedLayerIds;
   final List<LayerInfo> layers;
+  /// GL キャンバスのビュー変換。PixelCopyOverlay の doc→screen 変換用。
+  /// キー: zoom, panX, panY, rotation, surfaceWidth, surfaceHeight, docWidth, docHeight
+  final Map<String, dynamic>? viewTransform;
 
   const PaintState({
     this.brushType = 'Pencil',
@@ -50,7 +54,9 @@ class PaintState {
     this.toolMode = 'Draw',
     this.isDrawing = false,
     this.hasSelection = false,
+    this.selectedLayerIds = const {},
     this.layers = const [],
+    this.viewTransform,
   });
 
   PaintState copyWithMap(Map<String, dynamic> m) {
@@ -80,9 +86,17 @@ class PaintState {
       toolMode: m['toolMode'] as String? ?? toolMode,
       isDrawing: m['isDrawing'] as bool? ?? isDrawing,
       hasSelection: m['hasSelection'] as bool? ?? hasSelection,
+      selectedLayerIds: m['selectedLayerIds'] != null
+          ? (m['selectedLayerIds'] as List).map((e) => (e as num).toInt()).toSet()
+          : selectedLayerIds,
       layers: m['layers'] != null
           ? (m['layers'] as List).map((e) => LayerInfo.fromMap(Map<String, dynamic>.from(e as Map))).toList()
           : layers,
+      viewTransform: m.containsKey('viewTransform')
+          ? (m['viewTransform'] == null
+              ? null
+              : Map<String, dynamic>.from(m['viewTransform'] as Map))
+          : viewTransform,
     );
   }
 }
@@ -103,6 +117,8 @@ class LayerInfo {
   final int groupId;
   final bool isTextLayer;
   final bool isGroup;
+  final int depth;  // ツリー深度（インデント用）
+  final bool isExpanded;  // フォルダ展開状態
 
   const LayerInfo({
     required this.id,
@@ -120,6 +136,8 @@ class LayerInfo {
     this.groupId = 0,
     this.isTextLayer = false,
     this.isGroup = false,
+    this.depth = 0,
+    this.isExpanded = true,
   });
 
   factory LayerInfo.fromMap(Map<String, dynamic> m) => LayerInfo(
@@ -138,6 +156,8 @@ class LayerInfo {
         groupId: (m['groupId'] as num?)?.toInt() ?? 0,
         isTextLayer: m['isTextLayer'] as bool? ?? false,
         isGroup: m['isGroup'] as bool? ?? false,
+        depth: (m['depth'] as num?)?.toInt() ?? 0,
+        isExpanded: m['isExpanded'] as bool? ?? true,
       );
 }
 

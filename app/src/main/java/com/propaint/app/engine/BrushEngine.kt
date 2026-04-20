@@ -294,11 +294,11 @@ class BrushEngine(
                 val py = catmullRom(pPrev.y, p0.y, p1.y, pNext.y, t)
                 val pressure = p0.pressure + (p1.pressure - p0.pressure) * t
 
-                // 筆圧→サイズ (最小 0.5 = 直径1px)
+                // 筆圧→サイズ (最小: minBrushSizePercent% または直径1px)
                 // ぼかし筆圧閾値が設定されている場合、閾値時点のサイズを下限とする
                 // (閾値以下でもブラシサイズが極端に縮小しない)
                 val pRad = if (brush.pressureSizeEnabled) {
-                    val minRad = 0.5f
+                    val minRad = maxOf(0.5f, nomRad * brush.minBrushSizePercent / 100f)
                     val curve = pressureCurve(pressure, brush.pressureSizeIntensity)
                     val rad = minRad + (nomRad - minRad) * curve
                     if (brush.blurPressureThreshold > 0f && pressure < brush.blurPressureThreshold) {
@@ -450,13 +450,13 @@ class BrushEngine(
         val tx1 = minOf(surface.tilesX - 1, surface.pixelToTile(dr - 1))
         val ty1 = minOf(surface.tilesY - 1, surface.pixelToTile(db - 1))
 
-        // 選択範囲がある場合は、バウンディングボックスをクリップ
+        // 選択範囲がある場合は、バウンディングボックスをクリップ（ピクセル座標で比較）
         val sm = selectionManager
         val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
         if (selBounds != null) {
-            // 選択範囲外のダブは描画しない
-            if (tx0 > selBounds[2] || tx1 < selBounds[0] ||
-                ty0 > selBounds[3] || ty1 < selBounds[1]) {
+            // ダブのピクセル座標で選択範囲外チェック
+            if (dab.left >= selBounds[2] || dr <= selBounds[0] ||
+                dab.top >= selBounds[3] || db <= selBounds[1]) {
                 return  // 完全に選択範囲外
             }
         }
@@ -465,11 +465,10 @@ class BrushEngine(
             val tile = surface.getOrCreateMutable(tx, ty)
             val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
 
-            // 選択範囲チェック: タイルの全ピクセルが選択範囲外でないか確認
+            // 選択範囲チェック: タイルの全ピクセルが選択範囲外でないか確認（ピクセル座標同士）
             if (selBounds != null) {
-                val tileBounds = intArrayOf(ox, oy, ox + Tile.SIZE, oy + Tile.SIZE)
-                if (tileBounds[0] >= selBounds[2] || tileBounds[2] <= selBounds[0] ||
-                    tileBounds[1] >= selBounds[3] || tileBounds[3] <= selBounds[1]) {
+                if (ox >= selBounds[2] || ox + Tile.SIZE <= selBounds[0] ||
+                    oy >= selBounds[3] || oy + Tile.SIZE <= selBounds[1]) {
                     continue  // このタイルは選択範囲外
                 }
             }
@@ -506,9 +505,9 @@ class BrushEngine(
         val sm = selectionManager
         val selBounds = if (sm != null && sm.hasSelection) sm.getBounds() else null
         if (selBounds != null) {
-            // 選択範囲外のダブは描画しない
-            if (tx0 > selBounds[2] || tx1 < selBounds[0] ||
-                ty0 > selBounds[3] || ty1 < selBounds[1]) {
+            // 選択範囲外のダブは描画しない（ピクセル座標同士で比較）
+            if (dab.left >= selBounds[2] || dr <= selBounds[0] ||
+                dab.top >= selBounds[3] || db <= selBounds[1]) {
                 return  // 完全に選択範囲外
             }
         }
@@ -522,12 +521,11 @@ class BrushEngine(
         )
 
         for (ty in ty0..ty1) for (tx in tx0..tx1) {
-            // 選択範囲チェック: タイルの全ピクセルが選択範囲外でないか確認
+            // 選択範囲チェック: タイルのピクセル範囲で比較
             if (selBounds != null) {
                 val ox = tx * Tile.SIZE; val oy = ty * Tile.SIZE
-                val tileBounds = intArrayOf(ox, oy, ox + Tile.SIZE, oy + Tile.SIZE)
-                if (tileBounds[0] >= selBounds[2] || tileBounds[2] <= selBounds[0] ||
-                    tileBounds[1] >= selBounds[3] || tileBounds[3] <= selBounds[1]) {
+                if (ox >= selBounds[2] || ox + Tile.SIZE <= selBounds[0] ||
+                    oy >= selBounds[3] || oy + Tile.SIZE <= selBounds[1]) {
                     continue  // このタイルは選択範囲外
                 }
             }

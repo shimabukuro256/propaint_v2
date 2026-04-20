@@ -7,8 +7,9 @@ import 'panel_card.dart';
 /// フィルターパネル（既存の HSL/明るさコントラスト/ブラーに加え、新フィルターを追加）
 class FilterPanel extends StatefulWidget {
   final PaintChannel channel;
+  final int currentColor;
 
-  const FilterPanel({super.key, required this.channel});
+  const FilterPanel({super.key, required this.channel, this.currentColor = 0xFF000000});
 
   @override
   State<FilterPanel> createState() => _FilterPanelState();
@@ -38,10 +39,19 @@ class _FilterPanelState extends State<FilterPanel> {
   int _levelsInWhite = 255;
   double _levelsGamma = 1.0;
 
+  // モーションブラー
+  double _motionAngle = 0;
+  int _motionDistance = 10;
+
   // カラーバランス
   int _cbCyanRed = 0;
   int _cbMagentaGreen = 0;
   int _cbYellowBlue = 0;
+
+  // グラデーション
+  bool _gradientLinear = true; // true=線形, false=放射状
+  double _gradientAngle = 0; // 線形の角度（度）
+  bool _gradientToTransparent = true; // true=前景色→透明, false=前景色→白
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +89,28 @@ class _FilterPanelState extends State<FilterPanel> {
                   label: '閾値', value: '$_usmThreshold',
                   current: _usmThreshold.toDouble(), min: 0, max: 255,
                   onChanged: (v) => setState(() => _usmThreshold = v.round()),
+                ),
+              ],
+            ),
+
+            const Divider(color: C.border, height: 1, indent: 12, endIndent: 12),
+
+            // ── モーションブラー ──
+            _FilterSection(
+              title: 'モーションブラー',
+              onApply: () => widget.channel.applyMotionBlur(
+                angleDeg: _motionAngle, distance: _motionDistance,
+              ),
+              children: [
+                PanelSlider(
+                  label: '角度', value: '${_motionAngle.round()}°',
+                  current: _motionAngle, min: 0, max: 360,
+                  onChanged: (v) => setState(() => _motionAngle = v),
+                ),
+                PanelSlider(
+                  label: '距離', value: '$_motionDistance',
+                  current: _motionDistance.toDouble(), min: 1, max: 100, curve: 2.0,
+                  onChanged: (v) => setState(() => _motionDistance = v.round()),
                 ),
               ],
             ),
@@ -204,6 +236,103 @@ class _FilterPanelState extends State<FilterPanel> {
                   label: 'Yw-Blue', value: '$_cbYellowBlue',
                   current: _cbYellowBlue.toDouble(), min: -100, max: 100,
                   onChanged: (v) => setState(() => _cbYellowBlue = v.round()),
+                ),
+              ],
+            ),
+
+            const Divider(color: C.border, height: 1, indent: 12, endIndent: 12),
+
+            // ── 色反転 ──
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 10, 8),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text('色反転', style: TextStyle(color: C.textSecondary, fontSize: 12, fontWeight: FontWeight.w600)),
+                  ),
+                  SizedBox(
+                    height: 26,
+                    child: TextButton(
+                      onPressed: () => widget.channel.applyInvertColors(),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.accent,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                      ),
+                      child: const Text('適用'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const Divider(color: C.border, height: 1, indent: 12, endIndent: 12),
+
+            // ── グラデーション ──
+            _FilterSection(
+              title: 'グラデーション',
+              onApply: () {
+                final fg = widget.currentColor | 0xFF000000; // 完全不透明に
+                final endColor = _gradientToTransparent ? (fg & 0x00FFFFFF) : 0xFFFFFFFF;
+                if (_gradientLinear) {
+                  widget.channel.applyLinearGradientAngle(
+                    angleDeg: _gradientAngle, startColor: fg, endColor: endColor,
+                  );
+                } else {
+                  widget.channel.applyRadialGradientCenter(
+                    startColor: fg, endColor: endColor,
+                  );
+                }
+              },
+              children: [
+                // タイプ選択
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 72, child: Text('種類', style: TextStyle(color: C.textSecondary, fontSize: 12))),
+                      _MiniToggle(label: '線形', isActive: _gradientLinear, onTap: () => setState(() => _gradientLinear = true)),
+                      const SizedBox(width: 4),
+                      _MiniToggle(label: '放射状', isActive: !_gradientLinear, onTap: () => setState(() => _gradientLinear = false)),
+                    ],
+                  ),
+                ),
+                if (_gradientLinear)
+                  PanelSlider(
+                    label: '角度', value: '${_gradientAngle.round()}°',
+                    current: _gradientAngle, min: 0, max: 360,
+                    onChanged: (v) => setState(() => _gradientAngle = v),
+                  ),
+                // 終点色
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 72, child: Text('終点', style: TextStyle(color: C.textSecondary, fontSize: 12))),
+                      _MiniToggle(label: '透明', isActive: _gradientToTransparent, onTap: () => setState(() => _gradientToTransparent = true)),
+                      const SizedBox(width: 4),
+                      _MiniToggle(label: '白', isActive: !_gradientToTransparent, onTap: () => setState(() => _gradientToTransparent = false)),
+                    ],
+                  ),
+                ),
+                // 始点色プレビュー
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 72, child: Text('始点色', style: TextStyle(color: C.textSecondary, fontSize: 12))),
+                      Container(
+                        width: 24, height: 24,
+                        decoration: BoxDecoration(
+                          color: Color(widget.currentColor | 0xFF000000),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: C.border, width: 0.5),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Text('現在の描画色', style: TextStyle(color: C.textSecondary, fontSize: 11)),
+                    ],
+                  ),
                 ),
               ],
             ),

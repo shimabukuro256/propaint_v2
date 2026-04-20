@@ -173,6 +173,7 @@ class _BrushTypeGrid extends StatelessWidget {
 
   static const _icons = {
     'Pencil': Icons.edit_rounded,
+    'Pen': Icons.create_rounded,
     'Fude': Icons.brush_rounded,
     'Watercolor': Icons.water_drop_rounded,
     'Airbrush': Icons.air_rounded,

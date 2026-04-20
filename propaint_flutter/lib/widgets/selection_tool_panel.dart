@@ -35,7 +35,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
     _brushSize = widget.state.brushSize.toInt();
     // 初期選択モード：Add
     _isAddMode = true;
-    widget.channel.setSelectionMode('Add');
+    widget.channel.setSelectionMode(SelectionMode.add);
     // initState では toolMode を変更しない（ツールバーが既に設定済み）
   }
 
@@ -110,7 +110,7 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
         child: InkWell(
           onTap: () {
             setState(() => _isAddMode = isAdd);
-            final mode = isAdd ? 'Add' : 'Subtract';
+            final mode = isAdd ? SelectionMode.add : SelectionMode.subtract;
             widget.channel.setSelectionMode(mode);
           },
           borderRadius: BorderRadius.circular(8),
@@ -209,7 +209,10 @@ class _SelectionToolPanelState extends State<SelectionToolPanel> {
       );
       return;
     }
-    final bounds = await widget.channel.startPixelCopy();
+    // 複数レイヤー選択中なら多レイヤー浮遊選択 (Phase 3.5)
+    final selectedIds = widget.state.selectedLayerIds;
+    final layerIds = selectedIds.length >= 2 ? selectedIds.toList() : null;
+    final bounds = await widget.channel.startPixelCopy(layerIds: layerIds);
     if (mounted && widget.onPixelCopyStarted != null) {
       widget.onPixelCopyStarted!(bounds.cast<String, int>());
     }

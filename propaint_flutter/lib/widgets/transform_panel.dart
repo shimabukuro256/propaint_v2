@@ -2,26 +2,47 @@ import 'package:flutter/material.dart';
 
 import '../services/paint_channel.dart';
 import '../theme/app_colors.dart';
-import 'panel_card.dart';
 
-/// 変形ツールパネル
-/// selectedLayerIds が2つ以上ある場合、複数レイヤー一括変形を使用。
-class TransformPanel extends StatelessWidget {
+/// 選択範囲作成時に画面下部にフロート表示される横長の変形ツールバー。
+/// 自由変形（ピクセルコピー変形）、90°回転、反転、150%/50% スケールを提供する。
+///
+/// selectedLayerIds.length >= 2 の場合は複数レイヤー一括変形を優先する。
+class SelectionTransformBar extends StatelessWidget {
   final PaintChannel channel;
   final List<int> selectedLayerIds;
+  final bool hasSelection;
+  final Function(Map<String, int>)? onPixelCopyStarted;
 
-  const TransformPanel({
+  const SelectionTransformBar({
     super.key,
     required this.channel,
     this.selectedLayerIds = const [],
+    this.hasSelection = false,
+    this.onPixelCopyStarted,
   });
 
   bool get _isMulti => selectedLayerIds.length >= 2;
 
+  Future<void> _startFreeTransform(BuildContext context) async {
+    if (!hasSelection) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('選択範囲がありません'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+      return;
+    }
+    final layerIds = _isMulti ? selectedLayerIds.toList() : null;
+    final bounds = await channel.startPixelCopy(layerIds: layerIds);
+    if (onPixelCopyStarted != null && bounds.isNotEmpty) {
+      onPixelCopyStarted!(bounds.cast<String, int>());
+    }
+  }
+
   void _flipH() {
     if (_isMulti) {
-      channel.applyMultiLayerSimpleTransform(
-        layerIds: selectedLayerIds, operation: 'flipH');
+      channel.applyMultiLayerSimpleTransform(layerIds: selectedLayerIds, operation: 'flipH');
     } else {
       channel.flipLayerH();
     }
@@ -29,8 +50,7 @@ class TransformPanel extends StatelessWidget {
 
   void _flipV() {
     if (_isMulti) {
-      channel.applyMultiLayerSimpleTransform(
-        layerIds: selectedLayerIds, operation: 'flipV');
+      channel.applyMultiLayerSimpleTransform(layerIds: selectedLayerIds, operation: 'flipV');
     } else {
       channel.flipLayerV();
     }
@@ -38,214 +58,133 @@ class TransformPanel extends StatelessWidget {
 
   void _rotate90CW() {
     if (_isMulti) {
-      channel.applyMultiLayerSimpleTransform(
-        layerIds: selectedLayerIds, operation: 'rotate90CW');
+      channel.applyMultiLayerSimpleTransform(layerIds: selectedLayerIds, operation: 'rotate90CW');
     } else {
       channel.rotateLayer90CW();
     }
   }
 
-  void _scale(double sx, double sy) {
+  void _scale(double s) {
     if (_isMulti) {
-      channel.applyPreviewTransform(
-        layerIds: selectedLayerIds, scaleX: sx, scaleY: sy);
+      channel.applyPreviewTransform(layerIds: selectedLayerIds, scaleX: s, scaleY: s);
     } else {
-      channel.transformLayer(scaleX: sx, scaleY: sy);
+      channel.transformLayer(scaleX: s, scaleY: s);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return PanelCard(
-      width: 240,
-      child: Column(
+    return Container(
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: C.accent.withValues(alpha: 0.4), width: 1),
+        boxShadow: const [
+          BoxShadow(color: Colors.black54, blurRadius: 16, offset: Offset(0, 4)),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Row(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-            child: Row(
-              children: [
-                const Text('変形', style: TextStyle(color: C.textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
-                if (_isMulti) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: C.accent.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      '${selectedLayerIds.length}レイヤー',
-                      style: TextStyle(color: C.accent, fontSize: 10, fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ],
-              ],
+          if (_isMulti) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: C.accent.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '${selectedLayerIds.length}レイヤー',
+                style: TextStyle(color: C.accent, fontSize: 11, fontWeight: FontWeight.w600),
+              ),
             ),
+            const SizedBox(width: 8),
+          ],
+          _BarButton(
+            icon: Icons.open_with_rounded,
+            label: '自由変形',
+            emphasize: hasSelection,
+            onTap: () => _startFreeTransform(context),
           ),
-
-          // 反転
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 4, 14, 2),
-            child: Text('反転', style: TextStyle(color: C.textSecondary, fontSize: 11)),
+          _separator(),
+          _BarButton(
+            icon: Icons.zoom_in_rounded,
+            label: '150%',
+            onTap: () => _scale(1.5),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _TransformButton(
-                    icon: Icons.flip_rounded,
-                    label: '左右',
-                    onTap: _flipH,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _TransformButton(
-                    icon: Icons.flip_rounded,
-                    label: '上下',
-                    onTap: _flipV,
-                    rotateIcon: true,
-                  ),
-                ),
-              ],
-            ),
+          _BarButton(
+            icon: Icons.zoom_out_rounded,
+            label: '50%',
+            onTap: () => _scale(0.5),
           ),
-
-          const SizedBox(height: 8),
-
-          // 回転
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 0, 14, 2),
-            child: Text('回転', style: TextStyle(color: C.textSecondary, fontSize: 11)),
+          _separator(),
+          _BarButton(
+            icon: Icons.rotate_90_degrees_cw_rounded,
+            label: '90°',
+            onTap: _rotate90CW,
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _TransformButton(
-                    icon: Icons.rotate_90_degrees_cw_rounded,
-                    label: '90° 右',
-                    onTap: _rotate90CW,
-                  ),
-                ),
-              ],
-            ),
+          _separator(),
+          _BarButton(
+            icon: Icons.flip_rounded,
+            label: '左右',
+            onTap: _flipH,
           ),
-
-          const SizedBox(height: 8),
-
-          // 拡大縮小
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 0, 14, 2),
-            child: Text('拡大縮小', style: TextStyle(color: C.textSecondary, fontSize: 11)),
+          _BarButton(
+            icon: Icons.flip_rounded,
+            label: '上下',
+            rotateIcon: true,
+            onTap: _flipV,
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _TransformButton(
-                    icon: Icons.zoom_in_rounded,
-                    label: '150%',
-                    onTap: () => _scale(1.5, 1.5),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _TransformButton(
-                    icon: Icons.zoom_out_rounded,
-                    label: '50%',
-                    onTap: () => _scale(0.5, 0.5),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          // ディストート・ワープ
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 0, 14, 2),
-            child: Text('変形モード', style: TextStyle(color: C.textSecondary, fontSize: 11)),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: _TransformButton(
-                        icon: Icons.open_with_rounded,
-                        label: 'ユニフォーム',
-                        onTap: () => _scale(1.0, 1.0),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _TransformButton(
-                        icon: Icons.crop_free_rounded,
-                        label: 'リキファイ',
-                        onTap: () {
-                          channel.setToolMode('Liquify');
-                          channel.beginLiquify();
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 10),
         ],
       ),
     );
   }
+
+  Widget _separator() => Container(
+        width: 1,
+        height: 22,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        color: C.border,
+      );
 }
 
-class _TransformButton extends StatelessWidget {
+class _BarButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
   final bool rotateIcon;
+  final bool emphasize;
 
-  const _TransformButton({
+  const _BarButton({
     required this.icon,
     required this.label,
     required this.onTap,
     this.rotateIcon = false,
+    this.emphasize = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final bg = emphasize ? C.accent.withValues(alpha: 0.18) : Colors.transparent;
+    final color = emphasize ? C.accent : C.textPrimary;
     return Material(
-      color: C.surface,
+      color: bg,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Transform.rotate(
                 angle: rotateIcon ? 1.5708 : 0,
-                child: Icon(icon, size: 18, color: C.iconDefault),
+                child: Icon(icon, size: 18, color: color),
               ),
-              const SizedBox(width: 6),
-              Text(label, style: const TextStyle(color: C.textPrimary, fontSize: 12)),
+              const SizedBox(height: 2),
+              Text(label, style: TextStyle(color: color, fontSize: 10)),
             ],
           ),
         ),

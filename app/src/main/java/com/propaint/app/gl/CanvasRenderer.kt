@@ -325,10 +325,13 @@ class CanvasRenderer : GLSurfaceView.Renderer {
         buf.position(0)
 
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, selTexId)
+        // GL_ALPHA は 1 バイト/ピクセル。幅が 4 の倍数でないと既定値 4 で行がずれて斜めに歪む。
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
         GLES20.glTexImage2D(
             GLES20.GL_TEXTURE_2D, 0, GLES20.GL_ALPHA,
             w, h, 0, GLES20.GL_ALPHA, GLES20.GL_UNSIGNED_BYTE, buf
         )
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 4)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 

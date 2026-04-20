@@ -2,182 +2,92 @@
 
 > HiPaint / Procreate をリファレンスとした機能一覧。
 > 各セッションで実装後にチェックを入れること。
->
+> **操作方針**: ペンとタブレットのみで全操作が完結する設計。キーボードショートカットはジェスチャー操作・ツール切替の互換ショートカット（キー単体で機能）として実装し、キーボード＋ジェスチャーの組み合わせ操作（Ctrl+クリック等）は行わない。
 > **除外機能（実装しない）**: アニメーション/オニオンスキン, CMYK色空間, ブルーム, グリッチ, ハーフトーン, 色収差, パースペクティブブラー
 
 ---
 
-## 1. 選択範囲（Selection）
 
-### 1.1 選択ツール（実装済み）
-- [x] 矩形選択 (SelectRect)
-- [x] 楕円選択 (SelectEllipse)
-- [x] なげなわ選択 (SelectLasso)
-- [x] 自動選択 / マジックワンド (SelectMagicWand)
-- [x] 選択ペン / 選択消し (SelectPen / SelectEraser)
-- [x] 選択モード: Replace / Add / Subtract / Intersect
-- [x] ぼかし (Feather)
-- [x] 選択解除 (Clear)
-- [x] 全選択 (SelectAll)
-- [x] 選択反転 (Invert)
-- [x] 選択範囲の拡張/縮小 (Expand/Contract)
 
-### 1.2 選択操作（実装済み）
-- [x] 選択範囲内のピクセル移動 (Move) — ドラッグで選択領域内のピクセルを移動 (2026-04-06)
-- [x] 選択範囲のコピー&ペースト (Copy & Paste) — 選択部分を新規レイヤーにコピー (2026-04-06)
-- [x] 選択範囲の切り取り (Cut) — 選択部分を切り取って新規レイヤーに (2026-04-06)
-- [x] 選択範囲の削除 (Delete) — 選択領域内を透明にクリア (2026-04-06)
-- [x] 選択範囲のカラーフィル (Color Fill) — 選択領域を現在の色で塗りつぶし (2026-04-06)
-- [x] 選択パネル UI 改善 — 上記操作ボタンを SelectionPanel に追加 (2026-04-06)
 
-### 1.3 選択 UI/UX の修正（完了分）
-- [x] 選択解除ボタンへのアクセス — ツールバーから SelectionPanel を開けるように修正 (2026-04-06)
+## Pigeon による MethodChannel 型安全化（段階移行中）
 
----
+### 目的
+LLM (Claude) のコード生成時のキー名タイポ・型ミスマッチ・null チェック漏れを、
+**コンパイル時検査** で構造的に排除する。
 
-## 2. 変形（Transform）
+### 進捗管理
+詳細手順・セッション別チェックリストは [docs/PIGEON_MIGRATION.md](docs/PIGEON_MIGRATION.md) を参照。
+**次セッション開始時は必ず docs/PIGEON_MIGRATION.md の「進捗」セクションを読むこと。**
 
-### 2.1 基本変形（実装済み）
-- [x] 自由変形 (FreeTransform) — 移動/拡縮/回転
-- [x] 水平反転 (Flip H)
-- [x] 垂直反転 (Flip V)
-- [x] 90度回転 (Rotate 90 CW)
-- [x] バイリニア補間
+### 大枠チェックリスト
 
-### 2.2 拡張変形（実装済み）
-- [x] ユニフォーム変形 — アスペクト比を維持したリサイズ (2026-04-06) ※transformLayerで同一scaleX/Yを渡す
-- [x] ディストート — 4コーナーを個別にドラッグ（パースペクティブ変形） (2026-04-06)
-- [x] メッシュ変形（ワープ） — グリッドノードをドラッグして自由変形 (2026-04-06)
-- [x] リキファイ（ゆがみ） — ブラシで押す/渦巻き/膨張/収縮 (2026-04-06) Push/TwirlCW/CCW/Pinch/Expand
-- [ ] スナッピング — 中心線/端へのガイドライン吸着（GL レンダラー側の実装が必要）
-- [x] 補間オプション — Nearest Neighbor / Bilinear / Bicubic 切替 (2026-04-06) ※Bicubic (Mitchell-Netravali) 追加
-
----
-
-## 3. フィルター/調整（Filters & Adjustments）
-
-### 3.1 色調整（実装済み）
-- [x] HSL (色相/彩度/明度)
-- [x] 明暗コントラスト
-- [x] カラーバランス
-- [x] トーンカーブ
-- [x] グラデーションマップ
-- [x] レベル補正
-
-### 3.2 フィルター（実装済み）
-- [x] ガウシアンぼかし
-- [x] ノイズ
-- [x] シャープ (アンシャープマスク)
-- [x] モザイク
-- [x] ポスタライズ
-- [x] 二値化 (Threshold)
-
-### 3.3 フィルター（未実装）
-- [ ] モーションブラー — 方向性のあるぶれ効果
-- [ ] 色反転フィルター (Invert Colors)
-- [ ] クローンスタンプ — 画像の一部を別の場所にペイント
-
----
-
-## 4. ブラシ（Brush）
-
-### 4.1 実装済み
-- [x] 鉛筆 (Pencil)
-- [x] 筆 (Fude)
-- [x] 水彩筆 (Watercolor)
-- [x] エアブラシ (Airbrush)
-- [x] マーカー (Marker)
-- [x] 消しゴム (Eraser)
-- [x] ぼかしブラシ (Blur)
-- [x] 筆圧サイズ/透明度/密度
-- [x] 手振れ補正 (Stabilizer)
-- [x] ブラシ設定の保存/読込 (JSON)
-
-### 4.2 未実装
-- [ ] スマッジ（指先ツール） — 色を混ぜるように塗る/引き伸ばす
-
----
-
-## 5. カラー（Color）
-
-### 5.1 実装済み
-- [x] HSV カラーピッカー
-- [x] スポイト (Eyedropper)
-- [x] 塗りつぶし (Flood Fill)
-- [x] 色履歴
-
-### 5.2 未実装
-- [ ] カラーパレット管理 — パレットの作成/保存/切替/共有
-
----
-
-## 6. レイヤー（Layer）
-
-### 6.1 実装済み
-- [x] レイヤー追加/削除/複製
-- [x] レイヤーグループ（フォルダ）
-- [x] クリッピングマスク (Clip to Below)
-- [x] レイヤーマスク
-- [x] アルファロック
-- [x] レイヤー結合 (Merge Down / Batch)
-- [x] レイヤーの不透明度/可視性/ロック
-- [x] 20+ ブレンドモード
-- [x] テキストレイヤー
-- [x] ドラッグ&ドロップ並び替え
-
-### 6.2 レイヤー保存の修正（完了分）
-- [x] .ppaint ファイルにレイヤーグループを保存/読込 (2026-04-06)
-
-### 6.3 未実装
-- [ ] リファレンスレイヤー — 塗りつぶし時の参照対象を指定
-
----
-
-## 7. キャンバスツール（Canvas Tools）
-
-### 7.1 実装済み
-- [x] ビューリセット
-- [x] ズーム/パン/回転
-
-### 7.2 未実装
-- [ ] 対称ガイド — 左右/上下/放射状の対称描画
-- [ ] パースペクティブガイド — 1点/2点/3点透視
-- [ ] グリッド表示 — 等間隔のグリッド線オーバーレイ
-- [ ] リファレンス画像 — 参考画像をキャンバス脇に表示
-
----
-
-## 8. エクスポート / I/O
-
-### 8.1 実装済み
-- [x] .ppaint プロジェクト保存/読込
-- [x] PSD エクスポート/インポート
-- [x] PNG エクスポート
-- [x] JPG エクスポート
-
-### 8.2 未実装
-- [ ] タイムラプス動画（描画過程の再生） — ストロークを記録しMP4書き出し
-
----
-
-## 9. その他
-
-### 9.1 実装済み
-- [x] テキストツール
-- [x] 図形ツール（直線/矩形/楕円）
-- [x] Undo / Redo
-- [x] ギャラリー画面
-
-### 9.2 未実装
-- [ ] グラデーションツール — 線形/放射状のグラデーション描画
-
----
-
-## バグ修正履歴
-
-| 日付 | 内容 |
-|------|------|
-| 2026-04-06 | .ppaint にレイヤーグループ (groupId + LayerGroupInfo) の保存/読込を追加 |
-| 2026-04-06 | 選択解除ボタンが UI から到達不能だった問題を修正（ツールバー→SelectionPanel） |
-| 2026-04-06 | 選択操作 6項目実装: Move/Copy/Cut/Delete/ColorFill + UI ボタン追加 |
-| 2026-04-06 | 変形 5項目実装: ディストート/メッシュワープ/リキファイ/Bicubic補間/ユニフォーム |
+- [x] **Session 1**: セットアップ + setBrushSize 試験移行 完了（2026-04-19）
+  - [x] pubspec.yaml に pigeon 追加
+  - [x] pigeons/paint_api.dart 作成
+  - [x] docs/PIGEON_MIGRATION.md 作成
+  - [x] scripts/gen_pigeon.ps1 作成
+  - [x] ユーザー環境で pigeon コード生成成功
+  - [x] PaintFlutterActivity で PaintHostApi 実装登録・cleanUpで解除
+  - [x] paint_channel.dart の setBrushSize を Pigeon 経由に置換（並走）
+  - [x] Kotlin コンパイル成功
+  - [ ] 実機動作確認（ブラシサイズスライダで描画）
+- [x] **Session 2**: Brush 設定系 完了（2026-04-19、20 メソッド）
+  - [x] pigeons/paint_api.dart に 20 メソッド追加・再生成
+  - [x] PaintFlutterActivity に `object : PaintHostApi` 全 20 メソッド実装登録
+  - [x] paint_channel.dart の Brush 系 20 メソッドを Pigeon 経由に切替（並走維持）
+  - [x] Dart int → Kotlin Long マッピング対応（setBrushMinSizePercent）
+  - [x] 不正値検証: setBrushType は BrushType.name 不一致時 `FlutterError("INVALID_ARG")`、setBrushMinSizePercent は範囲外時 `FlutterError("INVALID_ARG")`
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [ ] 実機動作確認（Brush 系各スライダ・筆圧トグル・エクスポート/インポート/リセット）
+- [x] **Session 3**: Color + History + Layer CRUD 完了（2026-04-20、18 メソッド）
+  - [x] pigeons/paint_api.dart に 18 メソッド追加・再生成
+  - [x] PaintFlutterActivity に `object : PaintHostApi` で Session 3 全 18 メソッド実装追加
+  - [x] paint_channel.dart の Color/History/Layer CRUD を Pigeon 経由に切替（並走維持）
+  - [x] Dart int → Kotlin Long マッピング対応（setColor / レイヤー ID 系全般）
+  - [x] setLayerOpacity: 範囲外時 `FlutterError("INVALID_ARG")`
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [ ] 実機動作確認（カラー選択・Undo/Redo・レイヤー追加/削除/複製/結合/移動/並び替え・不透明度/ブレンドモード/クリップ/ロック/αロック/可視）
+- [x] **Session 4**: Batch Layer + Multi Selection 完了（2026-04-20、9 メソッド）
+  - [x] pigeons/paint_api.dart に 9 メソッド追加・再生成
+  - [x] PaintFlutterActivity に Session 4 全 9 メソッド実装追加
+  - [x] paint_channel.dart の Batch/Multi Selection 系を Pigeon 経由に切替（並走維持）
+  - [x] List<Long> → List<Int> 変換（`ids.map { it.toInt() }`）実装
+  - [x] batchSetOpacity: 範囲外時 `FlutterError("INVALID_ARG")`
+  - [x] setMultiSelection: List<Long> → Set<Int> 変換（`.map { it.toInt() }.toSet()`）
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [ ] 実機動作確認（複数レイヤー選択・一括可視/不透明度/ブレンドモード・一括マージ/移動）
+- [x] **Session 5**: Layer Group 完了（2026-04-20、12 メソッド）
+  - [x] pigeons/paint_api.dart に 12 メソッド追加・再生成（getLayersInGroup / getLayersInGroupRecursive は戻り値 List<int>）
+  - [x] PaintFlutterActivity に Session 5 全 12 メソッド実装追加
+  - [x] paint_channel.dart のフォルダ系を Pigeon 経由に切替（並走維持）
+  - [x] List<Long> → List<Int> 変換 + 戻り値は Long → Int の逆変換も実装
+  - [x] setGroupOpacity: 範囲外時 `FlutterError("INVALID_ARG")`
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [ ] 実機動作確認（フォルダ作成/削除・レイヤーのグループ移動・ドラッグ並び替え・展開/折畳）
+- [x] **Session 6**: Selection Tool + Selection Ops 完了（2026-04-20、19 メソッド）
+  - [x] pigeons/paint_api.dart に 19 メソッド追加・再生成
+  - [x] Pigeon enum `SelectionMode` を追加（Replace/Add/Subtract/Intersect）→ setSelectionMode の文字列排除
+  - [x] PaintFlutterActivity に Session 6 全 19 メソッド実装追加（Pigeon→engine enum マッピング）
+  - [x] paint_channel.dart の選択系を Pigeon 経由に切替（並走維持）
+  - [x] selection_tool_panel.dart の呼び出し元を `SelectionMode.add`/`SelectionMode.subtract` に更新
+  - [x] paint_channel.dart が `SelectionMode` を `export` 経由で公開
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [x] Dart 静的解析成功（`dart analyze` No issues）
+  - [ ] 実機動作確認（矩形/楕円/カラー/マグネット選択・選択ペン/消し・塗りつぶし/削除/コピー/切取/移動・反転/全選択/解除・ぼかし/拡張縮小・選択モード切替）
+- [x] **Session 7**: Transform + Pixel Copy + Pixel Movement 完了（2026-04-20、17 メソッド + PixelCopyBounds データクラス化）
+  - [x] pigeons/paint_api.dart に 17 メソッド + PixelCopyBounds data class 追加・再生成
+  - [x] PaintFlutterActivity に Session 7 全 17 メソッド実装追加
+  - [x] paint_channel.dart の Transform/Pixel Copy/Pixel Movement 系を Pigeon 経由に切替（並走維持）
+  - [x] startPixelCopy 戻り値をデータクラス化（PixelCopyBounds）、呼び出し元互換のため paint_channel.dart 内で Map<String, int> に変換
+  - [x] List<Long> → List<Int> 変換実装（layerIds / nodes / corners 系）
+  - [x] distortLayer は Dart 側で `assert(corners.length >= 8)`、Kotlin 側は `FlutterError("INVALID_ARG")`
+  - [x] applyPreviewTransform / applyMultiLayerSimpleTransform: 空 layerIds 時 `FlutterError("INVALID_ARG")`
+  - [x] Kotlin コンパイル成功（`./gradlew :app:compileDebugKotlin` BUILD SUCCESSFUL）
+  - [x] Dart 静的解析成功（`dart analyze lib/services/paint_channel.dart` No issues）
+  - [ ] 実機動作確認（反転/回転・自由変形・ディストート/メッシュワープ・複数レイヤー一括変形・リクイファイ・ピクセルコピー・ピクセル移動）
+- [ ] **Session 8**: Filter（15 メソッド）
+- [ ] **Session 9**: Mask + Shape/Fill/Text + Export/Import（10 メソッド）
+- [ ] **Session 10**: View + Tool Mode + 残余
+- [ ] **Session 11**: State Stream（FlutterApi 化）
+- [ ] **Final**: 旧 MethodChannel 撤去

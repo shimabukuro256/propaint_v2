@@ -194,32 +194,73 @@ object ShapeRenderer {
         // 塗りつぶし色がターゲットと同じなら何もしない (無限ループ防止)
         if (tol == 0 && targetColor == fillColor) return
 
+        // visited[idx]=true は「既に評価済み（一致/不一致含む）」を示す
         val visited = BooleanArray(w * h)
-        val queue = ArrayDeque<Int>(4096)
-        val startIdx = startY * w + startX
-        queue.add(startIdx)
-        visited[startIdx] = true
+        // 座標を Long にパック (上位 32bit=x, 下位 32bit=y)。BFS キューのボックス化を回避
+        val queue = ArrayDeque<Long>(4096)
+        queue.add((startX.toLong() shl 32) or (startY.toLong() and 0xFFFFFFFFL))
+        visited[startY * w + startX] = true
+
+        val tileSize = Tile.SIZE
+        val tilesX = surface.tilesX; val tilesY = surface.tilesY
+
+        // 書き込みタイルキャッシュ：連続ピクセルは同タイルに属する確率が高い
+        var cTx = -1; var cTy = -1
+        var cTile: Tile? = null
 
         while (queue.isNotEmpty()) {
-            val idx = queue.removeFirst()
-            val x = idx % w; val y = idx / w
-            val pixel = surface.getPixelAt(x, y)
-            if (!isColorSimilar(targetColor, pixel, tol)) continue
+            val packed = queue.removeFirst()
+            val x = (packed ushr 32).toInt()
+            val y = (packed and 0xFFFFFFFFL).toInt()
 
-            // ピクセルを書き込む
-            val tx = x / Tile.SIZE; val ty = y / Tile.SIZE
-            if (tx in 0 until surface.tilesX && ty in 0 until surface.tilesY) {
-                val tile = surface.getOrCreateMutable(tx, ty)
-                tile.pixels[(y - ty * Tile.SIZE) * Tile.SIZE + (x - tx * Tile.SIZE)] = fillColor
+            val tx = x / tileSize; val ty = y / tileSize
+            if (tx != cTx || ty != cTy) {
+                if (tx in 0 until tilesX && ty in 0 until tilesY) {
+                    cTile = surface.getOrCreateMutable(tx, ty)
+                    cTx = tx; cTy = ty
+                } else continue
             }
+            cTile!!.pixels[(y - ty * tileSize) * tileSize + (x - tx * tileSize)] = fillColor
 
-            // 4方向
-            if (x > 0 && !visited[idx - 1]) { visited[idx - 1] = true; queue.add(idx - 1) }
-            if (x < w - 1 && !visited[idx + 1]) { visited[idx + 1] = true; queue.add(idx + 1) }
-            if (y > 0 && !visited[idx - w]) { visited[idx - w] = true; queue.add(idx - w) }
-            if (y < h - 1 && !visited[idx + w]) { visited[idx + w] = true; queue.add(idx + w) }
+            // 4方向: push 前に近似色判定するため、pop 時の無駄な再検査を省く
+            if (x > 0) {
+                val ni = y * w + (x - 1)
+                if (!visited[ni]) {
+                    visited[ni] = true
+                    if (isColorSimilar(targetColor, surface.getPixelAt(x - 1, y), tol)) {
+                        queue.add(((x - 1).toLong() shl 32) or (y.toLong() and 0xFFFFFFFFL))
+                    }
+                }
+            }
+            if (x < w - 1) {
+                val ni = y * w + (x + 1)
+                if (!visited[ni]) {
+                    visited[ni] = true
+                    if (isColorSimilar(targetColor, surface.getPixelAt(x + 1, y), tol)) {
+                        queue.add(((x + 1).toLong() shl 32) or (y.toLong() and 0xFFFFFFFFL))
+                    }
+                }
+            }
+            if (y > 0) {
+                val ni = (y - 1) * w + x
+                if (!visited[ni]) {
+                    visited[ni] = true
+                    if (isColorSimilar(targetColor, surface.getPixelAt(x, y - 1), tol)) {
+                        queue.add((x.toLong() shl 32) or ((y - 1).toLong() and 0xFFFFFFFFL))
+                    }
+                }
+            }
+            if (y < h - 1) {
+                val ni = (y + 1) * w + x
+                if (!visited[ni]) {
+                    visited[ni] = true
+                    if (isColorSimilar(targetColor, surface.getPixelAt(x, y + 1), tol)) {
+                        queue.add((x.toLong() shl 32) or ((y + 1).toLong() and 0xFFFFFFFFL))
+                    }
+                }
+            }
         }
-        PaintDebug.d(PaintDebug.Layer) { "[Shape] floodFill ($startX,$startY) color=${fillColor.toUInt().toString(16)}" }
+        PaintDebug.d(PaintDebug.Layer) { "[Shape] floodFill ($startX,$startY) color=${fillColor.toUInt().toString(16)} tol=$tol" }
     }
 
     // ── グラデーション ────────────────────────────────────────

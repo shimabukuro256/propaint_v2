@@ -15,8 +15,11 @@ import com.propaint.app.engine.MemoryConfig
 import com.propaint.app.gallery.GalleryRepository
 import com.propaint.app.gl.CanvasRenderer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,6 +38,8 @@ data class UiLayer(
     val groupId: Int = 0,
     val isTextLayer: Boolean = false,
     val isGroup: Boolean = false,  // レイヤーグループ（フォルダ）フラグ
+    val depth: Int = 0,  // ツリー深度（インデント用）
+    val isExpanded: Boolean = true,  // フォルダ展開状態
 )
 
 enum class BrushType(
@@ -42,7 +47,8 @@ enum class BrushType(
     val supportsOpacity: Boolean = true,
     val supportsDensity: Boolean = true,
 ) {
-    Pencil("鉛筆"), Fude("筆", supportsOpacity = false),
+    Pencil("鉛筆"), Pen("ペン"),
+    Fude("筆", supportsOpacity = false),
     Watercolor("水彩筆", supportsOpacity = false), Airbrush("エアブラシ", supportsOpacity = false),
     Marker("マーカー", supportsDensity = false), Eraser("消しゴム"),
     Blur("ぼかし", supportsOpacity = false),
@@ -68,6 +74,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     val document: CanvasDocument? get() = _document
     val renderer = CanvasRenderer()
 
+    /** レイヤーツリー（UI表示用の単一ソース） */
+    private var _layerTree: LayerTree? = null
+    val layerTree: LayerTree? get() = _layerTree
+
     /** 現在編集中のプロジェクトID (null = ギャラリーから未オープン) */
     var currentProjectId: String? = null; private set
 
@@ -77,6 +87,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var hasUnsavedChanges = false
     /** 保存処理の排他制御。自動保存とライフサイクル保存の競合を防止 */
     private val saveMutex = Mutex()
+
+    /** addLayer 連打防止: 最後に addLayer を呼んだ時刻 (ms) */
+    @Volatile private var lastAddLayerTimeMs = 0L
+    private val addLayerDebounceMs = 300L
 
     private fun startAutoSave() {
         autoSaveJob?.cancel()
@@ -104,6 +118,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _toolMode = MutableStateFlow(ToolMode.Draw)
     val toolMode: StateFlow<ToolMode> = _toolMode.asStateFlow()
+
+    /** 塗りつぶしツールの色類似度しきい値 (0..255) */
+    private var _floodFillTolerance: Int = 0
+    fun setFloodFillTolerance(value: Int) { _floodFillTolerance = value.coerceIn(0, 255) }
 
     private val _brushSize = MutableStateFlow(10f)
     val brushSize: StateFlow<Float> = _brushSize.asStateFlow()
@@ -168,6 +186,10 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private val _isDrawing = MutableStateFlow(false)
     val isDrawing: StateFlow<Boolean> = _isDrawing.asStateFlow()
 
+    // ── エラーメッセージ通知 ────────────────────────────────────────────
+    private val _errorMessage = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val errorMessage: SharedFlow<String> = _errorMessage.asSharedFlow()
+
     // ── ブラシカーソル ────────────────────────────────────────────────
     data class CursorState(val x: Float, val y: Float, val radius: Float, val visible: Boolean)
     private val _cursorState = MutableStateFlow(CursorState(0f, 0f, 0f, false))
@@ -219,6 +241,20 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     private var gestureStartPanX = 0f; private var gestureStartPanY = 0f
     private var gestureStartMidX = 0f; private var gestureStartMidY = 0f
     private var isMultiTouch = false
+
+    // ビュー変換（zoom/pan/rotation）変更通知。
+    // Flutter 側 PixelCopyOverlay が追従するためのトリガーとして使う。
+    // conflate で collect することで、ジェスチャ中の高頻度イベントも最新値 1 件に絞られる。
+    private val _viewTransformTick = MutableSharedFlow<Unit>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
+    val viewTransformTick: SharedFlow<Unit> = _viewTransformTick.asSharedFlow()
+
+    private fun notifyViewTransformChanged() {
+        _viewTransformTick.tryEmit(Unit)
+    }
 
     // マルチタップ検出 (2本指=Undo, 3本指=Redo)
     private var multiTouchDownTime = 0L
@@ -940,7 +976,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
         // 選択ペン: ブラシサイズでマスクをペイント
         if (_toolMode.value == ToolMode.SelectPen) {
-            val isAdd = true
+            // 選択モードに応じて Add/Subtract を決定
+            val isAdd = _selectionMode.value != com.propaint.app.engine.SelectionMode.Subtract
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     doc.selectionManager.ensureMask()
@@ -987,11 +1024,11 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
-        // 塗りつぶし (FloodFill): タップ位置で塗りつぶし
+        // 塗りつぶし (FloodFill): タップ位置で塗りつぶし。Flutter 側で設定されたしきい値を適用。
         if (_toolMode.value == ToolMode.FloodFill) {
             if (event.actionMasked == MotionEvent.ACTION_UP) {
                 val (dx, dy) = screenToDoc(event.x, event.y)
-                floodFill(dx.toInt(), dy.toInt())
+                floodFill(dx.toInt(), dy.toInt(), _floodFillTolerance)
             }
             return true
         }
@@ -1025,6 +1062,17 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             MotionEvent.ACTION_DOWN -> {
                 isMultiTouch = false
                 updateCursor(event.x, event.y, event.pressure)
+
+                // アクティブレイヤーがフォルダの場合は描画できない
+                val tree = _layerTree
+                if (tree != null) {
+                    val activeNode = tree.findNode(doc.activeLayerId)
+                    if (activeNode is Folder) {
+                        _errorMessage.tryEmit("描画先レイヤーが選択されていません")
+                        return true
+                    }
+                }
+
                 var brush = buildBrushConfig()
                 if (isEraserTip) brush = brush.copy(isEraser = true, indirect = false, taperEnabled = false)
                 cachedStrokeBrush = brush
@@ -1288,6 +1336,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     _panX = gestureStartPanX + (midX - gestureStartMidX)
                     _panY = gestureStartPanY + (midY - gestureStartMidY)
                     renderer.pendingTransform.set(floatArrayOf(_zoom, _panX, _panY, _rotation))
+                    notifyViewTransformChanged()
                 }
             }
             MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
@@ -1360,6 +1409,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                 vx *= INERTIA_FRICTION
                 vy *= INERTIA_FRICTION
                 renderer.pendingTransform.set(floatArrayOf(_zoom, _panX, _panY, _rotation))
+                notifyViewTransformChanged()
                 delay(16L)
             }
         }
@@ -1368,19 +1418,109 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     // ── レイヤー操作 ────────────────────────────────────────────────
 
     fun addLayer() {
+        // 連打防止: 300ms 以内の呼び出しは無視
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAddLayerTimeMs < addLayerDebounceMs) {
+            PaintDebug.d(PaintDebug.Layer) { "[addLayer] debounce skip, dt=${now - lastAddLayerTimeMs}ms" }
+            return
+        }
+        lastAddLayerTimeMs = now
+
         val doc = _document ?: return
-        // アクティブレイヤーの1つ上に挿入
-        val activeIdx = doc.layers.indexOfFirst { it.id == doc.activeLayerId }
-        val insertAt = if (activeIdx >= 0) activeIdx + 1 else doc.layers.size
-        val newLayer = doc.addLayer("レイヤー ${doc.nextLayerNameIndex}", insertAt)
-        doc.setActiveLayer(newLayer.id)
-        hasUnsavedChanges = true; updateLayerState()
+        val tree = _layerTree
+
+        if (tree != null) {
+            // LayerTree 経由で追加
+            val activeNode = tree.findNode(tree.activeLayerId)
+
+            // 親フォルダと挿入位置を決定
+            val (parentFolderId, insertIndex) = when (activeNode) {
+                is Folder -> {
+                    // フォルダが選択されている場合、そのフォルダ内の先頭に追加
+                    activeNode.id to 0
+                }
+                is LayerData -> {
+                    // レイヤーが選択されている場合、そのレイヤーの直後に追加
+                    val parent = activeNode.parent
+                    if (parent != null) {
+                        parent.id to (parent.indexOf(activeNode) + 1)
+                    } else {
+                        null to (tree.root.indexOf(activeNode) + 1)
+                    }
+                }
+                null -> null to null
+            }
+
+            // LayerTree に新規レイヤーを追加
+            val newLayerData = tree.addLayer("レイヤー ${doc.nextLayerNameIndex}", parentFolderId, insertIndex)
+
+            // CanvasDocument にも追加（TiledSurface を共有するため Layer を作成）
+            val newLayer = Layer(
+                newLayerData.id,
+                newLayerData.name,
+                newLayerData.surface
+            )
+            doc.addLayerDirect(newLayer)
+
+            // LayerTree の構造を CanvasDocument に反映
+            syncCanvasDocumentFromTree()
+            tree.setActiveLayer(newLayerData.id)
+            hasUnsavedChanges = true
+            updateLayerStateFromTree()
+        } else {
+            // フォールバック: 従来の処理
+            val activeIdx = doc.layers.indexOfFirst { it.id == doc.activeLayerId }
+            val insertAt = if (activeIdx >= 0) activeIdx + 1 else doc.layers.size
+            val newLayer = doc.addLayer("レイヤー ${doc.nextLayerNameIndex}", insertAt)
+            doc.setActiveLayer(newLayer.id)
+            hasUnsavedChanges = true
+            updateLayerState()
+        }
     }
-    fun removeLayer(id: Int) { _document?.removeLayer(id); hasUnsavedChanges = true; updateLayerState() }
+
+    fun removeLayer(id: Int) {
+        val doc = _document ?: return
+        val tree = _layerTree
+
+        if (tree != null) {
+            // LayerTree から削除
+            val success = tree.removeNode(id)
+            if (success) {
+                // CanvasDocument からも削除
+                doc.removeLayer(id)
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
+            }
+        }
+
+        // フォールバック
+        doc.removeLayer(id)
+        hasUnsavedChanges = true
+        updateLayerState()
+    }
     fun selectLayer(id: Int) { _document?.setActiveLayer(id); updateLayerState() }
     fun setLayerVisibility(id: Int, v: Boolean) { _document?.setLayerVisibility(id, v); updateLayerState() }
     fun setLayerOpacity(id: Int, v: Float) { _document?.setLayerOpacity(id, v); updateLayerState() }
     fun setLayerBlendMode(id: Int, m: Int) { _document?.setLayerBlendMode(id, m); updateLayerState() }
+
+    // ── 複数レイヤー一括プロパティ変更 ──
+    fun batchSetVisibility(ids: List<Int>, visible: Boolean) {
+        val doc = _document ?: return
+        for (id in ids) doc.setLayerVisibility(id, visible)
+        updateLayerState()
+    }
+    fun batchSetOpacity(ids: List<Int>, opacity: Float) {
+        val doc = _document ?: return
+        for (id in ids) doc.setLayerOpacity(id, opacity)
+        updateLayerState()
+    }
+    fun batchSetBlendMode(ids: List<Int>, mode: Int) {
+        val doc = _document ?: return
+        for (id in ids) doc.setLayerBlendMode(id, mode)
+        updateLayerState()
+    }
     fun setLayerClip(id: Int, clip: Boolean) { _document?.setLayerClipToBelow(id, clip); updateLayerState() }
     fun setLayerLocked(id: Int, locked: Boolean) { _document?.setLayerLocked(id, locked); updateLayerState() }
     fun setAlphaLocked(id: Int, locked: Boolean) {
@@ -1389,58 +1529,88 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         layer.isAlphaLocked = locked
         updateLayerState()
     }
-    fun reorderLayer(fromIndex: Int, toIndex: Int) {
+    fun reorderLayer(fromId: Int, toId: Int, insertAfter: Boolean = false) {
         val doc = _document ?: return
-        if (fromIndex !in doc.layers.indices || toIndex !in doc.layers.indices) return
-        if (fromIndex == toIndex) return
+        val tree = _layerTree
+
+        if (fromId == toId) return
+
+        PaintDebug.d(PaintDebug.Layer) { "[reorderLayer] from=$fromId -> to=$toId insertAfter=$insertAfter" }
+
+        if (tree != null) {
+            // LayerTree で移動
+            val success = tree.moveNodeRelative(fromId, toId, insertAfter = insertAfter)
+            if (success) {
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
+            }
+        }
+
+        // フォールバック: 従来の処理
+        val fromIndex = doc.layers.indexOfFirst { it.id == fromId }
+        val toIndex = doc.layers.indexOfFirst { it.id == toId }
+        if (fromIndex < 0 || toIndex < 0) return
+
+        val fromLayer = doc.layers[fromIndex]
+        val toLayer = doc.layers[toIndex]
+        val fromDisplayOrder = fromLayer.displayOrder
+        val toDisplayOrder = toLayer.displayOrder
+
+        if (fromDisplayOrder < toDisplayOrder) {
+            for (layer in doc.layers) {
+                if (layer.displayOrder > fromDisplayOrder && layer.displayOrder <= toDisplayOrder) {
+                    layer.displayOrder -= 1
+                }
+            }
+            fromLayer.displayOrder = toDisplayOrder
+        } else {
+            for (layer in doc.layers) {
+                if (layer.displayOrder >= toDisplayOrder && layer.displayOrder < fromDisplayOrder) {
+                    layer.displayOrder += 1
+                }
+            }
+            fromLayer.displayOrder = toDisplayOrder
+        }
+
         doc.moveLayer(fromIndex, toIndex)
         updateLayerState()
     }
 
-    fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int) {
+    fun reorderLayerGroup(fromGroupId: Int, toGroupId: Int, insertAfter: Boolean = false) {
         val doc = _document ?: return
+        val tree = _layerTree
+
         // グループID（負数）を正に変換（Flutter側での表現）
         val actualFromId = if (fromGroupId < 0) -fromGroupId else fromGroupId
         val actualToId = if (toGroupId < 0) -toGroupId else toGroupId
-        doc.reorderLayerGroup(actualFromId, actualToId)
-        updateLayerState()
-    }
 
-    /// フォルダとレイヤーが混在している場合の統一的な並び替え
-    /// fromId/toId: レイヤーID またはグループID（グループは負数）
-    fun reorderDisplayItem(fromId: Int, toId: Int) {
-        val doc = _document ?: return
+        if (actualFromId == actualToId) return
 
-        // グループID（負数）を正に変換
-        val actualFromId = if (fromId < 0) -fromId else fromId
-        val actualToId = if (toId < 0) -toId else toId
+        PaintDebug.d(PaintDebug.Layer) { "[reorderLayerGroup] from=$actualFromId -> to=$actualToId insertAfter=$insertAfter" }
 
-        // fromId と toId のアイテムを取得
-        val fromLayer = doc.layers.find { it.id == actualFromId }
-        val fromGroup = doc.layerGroups[actualFromId]
-        val fromItem = fromLayer ?: (fromGroup?.let { it as Any })
-        val fromDisplayOrder = fromLayer?.displayOrder ?: fromGroup?.displayOrder ?: return
-
-        val toLayer = doc.layers.find { it.id == actualToId }
-        val toGroup = doc.layerGroups[actualToId]
-        val toItem = toLayer ?: (toGroup?.let { it as Any })
-        val toDisplayOrder = toLayer?.displayOrder ?: toGroup?.displayOrder ?: return
-
-        if (fromDisplayOrder == toDisplayOrder) return
-
-        // 移動方向を判定して、途中のアイテムを シフトして順序を保持
-        val allItems = (doc.layers.map { it as Any } + doc.layerGroups.values.map { it as Any })
-            .sortedBy {
-                when (it) {
-                    is Layer -> it.displayOrder
-                    is LayerGroupInfo -> it.displayOrder
-                    else -> 0
-                }
+        if (tree != null) {
+            // LayerTree で移動
+            val success = tree.moveNodeRelative(actualFromId, actualToId, insertAfter = insertAfter)
+            if (success) {
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
             }
+        }
+
+        // フォールバック: 従来の処理
+        val fromGroup = doc.layerGroups[actualFromId] ?: return
+        val toGroup = doc.layerGroups[actualToId] ?: return
+
+        val fromDisplayOrder = fromGroup.displayOrder
+        val toDisplayOrder = toGroup.displayOrder
+
+        val allItems = doc.layers.map { it as Any } + doc.layerGroups.values.map { it as Any }
 
         if (fromDisplayOrder < toDisplayOrder) {
-            // fromId が上にある（displayOrder が小さい）→ 下に移動
-            // fromId の次から toId までを1つ上にシフト
             for (item in allItems) {
                 val order = when (item) {
                     is Layer -> item.displayOrder
@@ -1454,14 +1624,8 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            // fromId を toId と同じ位置に移動
-            when (fromItem) {
-                is Layer -> fromItem.displayOrder = toDisplayOrder - 1
-                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder - 1
-            }
+            fromGroup.displayOrder = toDisplayOrder
         } else {
-            // fromId が下にある（displayOrder が大きい）→ 上に移動
-            // toId から fromId の前までを1つ下にシフト
             for (item in allItems) {
                 val order = when (item) {
                     is Layer -> item.displayOrder
@@ -1475,15 +1639,95 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            // fromId を toId と同じ位置に移動
-            when (fromItem) {
-                is Layer -> fromItem.displayOrder = toDisplayOrder + 1
-                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder + 1
+            fromGroup.displayOrder = toDisplayOrder
+        }
+
+        doc.dirtyTracker.markFullRebuild()
+        updateLayerState()
+    }
+
+    /// フォルダとレイヤーが混在している場合の統一的な並び替え
+    /// fromId/toId: レイヤーID またはグループID（グループは負数）
+    fun reorderDisplayItem(fromId: Int, toId: Int) {
+        val doc = _document ?: return
+        val tree = _layerTree
+
+        // グループID（負数）を正に変換
+        val actualFromId = if (fromId < 0) -fromId else fromId
+        val actualToId = if (toId < 0) -toId else toId
+
+        if (actualFromId == actualToId) return
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[reorderDisplayItem] from=$actualFromId -> to=$actualToId (LayerTree=${tree != null})"
+        }
+
+        if (tree != null) {
+            // LayerTree で移動（toId の直前に挿入）
+            val success = tree.moveNodeRelative(actualFromId, actualToId, insertAfter = false)
+            if (success) {
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
             }
         }
 
-        // displayOrder 変更に加えて、レイヤーリスト内の実際の順序も更新
-        // (rebuildCompositeTile が正しい順序で合成されるようにするため)
+        // フォールバック: 従来の displayOrder ベースの処理
+        val isFromGroup = fromId < 0
+        val isToGroup = toId < 0
+
+        val fromLayer = if (!isFromGroup) doc.layers.find { it.id == actualFromId } else null
+        val fromGroup = if (isFromGroup) doc.layerGroups[actualFromId] else null
+        val fromItem: Any = fromLayer ?: fromGroup ?: return
+        val fromDisplayOrder = fromLayer?.displayOrder ?: fromGroup?.displayOrder ?: return
+
+        val toLayer = if (!isToGroup) doc.layers.find { it.id == actualToId } else null
+        val toGroup = if (isToGroup) doc.layerGroups[actualToId] else null
+        val toDisplayOrder = toLayer?.displayOrder ?: toGroup?.displayOrder ?: return
+
+        if (fromDisplayOrder == toDisplayOrder) return
+
+        val allItems = doc.layers.map { it as Any } + doc.layerGroups.values.map { it as Any }
+
+        if (fromDisplayOrder < toDisplayOrder) {
+            for (item in allItems) {
+                val order = when (item) {
+                    is Layer -> item.displayOrder
+                    is LayerGroupInfo -> item.displayOrder
+                    else -> continue
+                }
+                if (order > fromDisplayOrder && order <= toDisplayOrder) {
+                    when (item) {
+                        is Layer -> item.displayOrder -= 1
+                        is LayerGroupInfo -> item.displayOrder -= 1
+                    }
+                }
+            }
+            when (fromItem) {
+                is Layer -> fromItem.displayOrder = toDisplayOrder
+                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder
+            }
+        } else {
+            for (item in allItems) {
+                val order = when (item) {
+                    is Layer -> item.displayOrder
+                    is LayerGroupInfo -> item.displayOrder
+                    else -> continue
+                }
+                if (order >= toDisplayOrder && order < fromDisplayOrder) {
+                    when (item) {
+                        is Layer -> item.displayOrder += 1
+                        is LayerGroupInfo -> item.displayOrder += 1
+                    }
+                }
+            }
+            when (fromItem) {
+                is Layer -> fromItem.displayOrder = toDisplayOrder
+                is LayerGroupInfo -> fromItem.displayOrder = toDisplayOrder
+            }
+        }
+
         if (fromLayer != null && toLayer != null) {
             val fromIdx = doc.layers.indexOfFirst { it.id == actualFromId }
             val toIdx = doc.layers.indexOfFirst { it.id == actualToId }
@@ -1492,11 +1736,42 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        doc.dirtyTracker.markFullRebuild()
         updateLayerState()
     }
 
     fun clearActiveLayer() { _document?.let { it.clearLayer(it.activeLayerId) }; hasUnsavedChanges = true; updateLayerState() }
-    fun duplicateLayer(id: Int) { _document?.duplicateLayer(id); updateLayerState() }
+
+    fun duplicateLayer(id: Int) {
+        val doc = _document ?: return
+        val tree = _layerTree
+
+        if (tree != null) {
+            // LayerTree で複製
+            val copy = tree.duplicateLayer(id)
+            if (copy != null) {
+                // CanvasDocument にも追加
+                val newLayer = Layer(copy.id, copy.name, copy.surface)
+                newLayer.opacity = copy.opacity
+                newLayer.blendMode = copy.blendMode
+                newLayer.isVisible = copy.isVisible
+                newLayer.isLocked = copy.isLocked
+                newLayer.isClipToBelow = copy.isClipToBelow
+                newLayer.isAlphaLocked = copy.isAlphaLocked
+                doc.addLayerDirect(newLayer)
+
+                // 構造を同期
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
+            }
+        }
+
+        // フォールバック
+        doc.duplicateLayer(id)
+        updateLayerState()
+    }
     fun mergeDown(id: Int) { _document?.mergeDown(id); updateLayerState() }
     fun batchMergeLayers(ids: List<Int>) { _document?.batchMergeLayers(ids); updateLayerState() }
     fun moveLayerUp(id: Int) {
@@ -1600,18 +1875,144 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── レイヤーグループ ──────────────────────────────────────────────
     fun createLayerGroup(name: String) {
-        _document?.createLayerGroup(name); updateLayerState()
+        val doc = _document ?: return
+        val tree = _layerTree
+
+        if (tree != null) {
+            // フォルダ名の連番を計算
+            val finalName = if (name == "フォルダ") {
+                val count = tree.getAllNodes().count { it is Folder && it.name.startsWith("フォルダ") }
+                "フォルダ ${count + 1}"
+            } else {
+                name
+            }
+
+            // LayerTree でフォルダを追加
+            val folder = tree.addFolder(finalName)
+
+            // CanvasDocument にも追加
+            val groupInfo = LayerGroupInfo(folder.id, folder.name, displayOrder = 0)
+            doc.importLayerGroup(groupInfo)
+
+            // 構造を同期
+            syncCanvasDocumentFromTree()
+            hasUnsavedChanges = true
+            updateLayerStateFromTree()
+        } else {
+            // フォールバック
+            doc.createLayerGroup(name)
+            updateLayerState()
+        }
     }
+
     fun deleteLayerGroup(groupId: Int) {
+        val doc = _document ?: return
+        val tree = _layerTree
+
         // グループID（負数）を正に変換（Flutter側での表現）
         val actualGroupId = if (groupId < 0) -groupId else groupId
-        _document?.deleteLayerGroup(actualGroupId); updateLayerState()
+
+        if (tree != null) {
+            // LayerTree からフォルダを削除（子レイヤーも削除される）
+            val folder = tree.findFolder(actualGroupId)
+            if (folder != null) {
+                // フォルダ内のレイヤーを CanvasDocument からも削除
+                for (child in folder.getAllLayers()) {
+                    doc.removeLayer(child.id)
+                }
+            }
+
+            val success = tree.removeNode(actualGroupId)
+            if (success) {
+                // CanvasDocument からグループ情報を削除
+                doc.removeLayerGroupInfo(actualGroupId)
+                syncCanvasDocumentFromTree()
+                hasUnsavedChanges = true
+                updateLayerStateFromTree()
+                return
+            }
+        }
+
+        // フォールバック
+        doc.deleteLayerGroup(actualGroupId)
+        updateLayerState()
     }
     fun setLayerGroup(layerId: Int, groupId: Int) {
+        val doc = _document ?: return
+        val tree = _layerTree ?: run {
+            // LayerTree がない場合は従来の方法にフォールバック
+            val actualGroupId = if (groupId < 0) -groupId else groupId
+            doc.setLayerGroup(layerId, actualGroupId)
+            updateLayerState()
+            return
+        }
+
         // groupId が負数（Flutter 側でのグループID表現）の場合は正数に変換
         val actualGroupId = if (groupId < 0) -groupId else groupId
-        _document?.setLayerGroup(layerId, actualGroupId); updateLayerState()
+        val targetParentId = if (actualGroupId > 0) actualGroupId else null
+
+        // LayerTree で移動（末尾に追加）
+        val success = tree.moveNode(layerId, targetParentId, null)
+        if (success) {
+            // CanvasDocument に反映
+            syncCanvasDocumentFromTree()
+            hasUnsavedChanges = true
+        }
+
+        updateLayerStateFromTree()
     }
+
+    /** 複数レイヤーを一括でフォルダに移動（またはフォルダから取り出す） */
+    fun batchSetLayerGroup(layerIds: List<Int>, groupId: Int) {
+        val tree = _layerTree ?: return
+        if (layerIds.isEmpty()) return
+
+        // groupId が負数（Flutter 側でのグループID表現）の場合は正数に変換
+        val actualGroupId = if (groupId < 0) -groupId else groupId
+        val targetParentId = if (actualGroupId > 0) actualGroupId else null
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[batchSetLayerGroup] layers=${layerIds.joinToString(",")} -> group=${targetParentId ?: "root"}"
+        }
+
+        var anySuccess = false
+        for (layerId in layerIds) {
+            val success = tree.moveNode(layerId, targetParentId, null)
+            if (success) anySuccess = true
+        }
+
+        if (anySuccess) {
+            syncCanvasDocumentFromTree()
+            hasUnsavedChanges = true
+        }
+        updateLayerStateFromTree()
+    }
+
+    /** 複数レイヤーを一括で指定位置に相対移動（フォルダ外への移動等） */
+    fun batchMoveLayersRelative(layerIds: List<Int>, targetId: Int, insertAfter: Boolean) {
+        val tree = _layerTree ?: return
+        if (layerIds.isEmpty()) return
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[batchMoveLayersRelative] layers=${layerIds.joinToString(",")} -> ${if (insertAfter) "after" else "before"} $targetId"
+        }
+
+        var anySuccess = false
+        // 移動順序: insertAfter=true の場合は逆順に移動（後から挿入すると順序が保たれる）
+        val orderedIds = if (insertAfter) layerIds.reversed() else layerIds
+        for (layerId in orderedIds) {
+            if (layerId == targetId) continue
+            val success = tree.moveNodeRelative(layerId, targetId, insertAfter)
+            if (success) anySuccess = true
+        }
+
+        if (anySuccess) {
+            syncCanvasDocumentFromTree()
+            hasUnsavedChanges = true
+        }
+        updateLayerStateFromTree()
+    }
+
     fun setGroupVisibility(groupId: Int, visible: Boolean) {
         // グループID（負数）を正に変換（Flutter側での表現）
         val actualGroupId = if (groupId < 0) -groupId else groupId
@@ -1621,6 +2022,13 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         // グループID（負数）を正に変換（Flutter側での表現）
         val actualGroupId = if (groupId < 0) -groupId else groupId
         _document?.setGroupOpacity(actualGroupId, opacity); updateLayerState()
+    }
+
+    fun setFolderExpanded(folderId: Int, expanded: Boolean) {
+        // folderId は Flutter 側では負数で渡される場合がある
+        val actualFolderId = if (folderId < 0) -folderId else folderId
+        _layerTree?.setFolderExpanded(actualFolderId, expanded)
+        updateLayerStateFromTree()
     }
 
     // ── フィルター ──────────────────────────────────────────────────
@@ -1670,6 +2078,7 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun resetView() {
         _zoom = 1f; _panX = 0f; _panY = 0f; _rotation = 0f
         renderer.pendingTransform.set(floatArrayOf(_zoom, _panX, _panY, _rotation))
+        notifyViewTransformChanged()
     }
 
     // ── エクスポート ────────────────────────────────────────────────
@@ -1755,61 +2164,206 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── 内部 ────────────────────────────────────────────────────────
 
+    /**
+     * CanvasDocument の状態から LayerTree を再構築する。
+     * Phase 2: ブリッジ方式 - CanvasDocument と LayerTree を同期
+     */
+    private fun syncLayerTree() {
+        val doc = _document ?: return
+
+        // 既存のツリーから展開状態を保存
+        val oldExpandedState = mutableMapOf<Int, Boolean>()
+        _layerTree?.let { oldTree ->
+            for (node in oldTree.getAllNodes()) {
+                if (node is Folder) {
+                    oldExpandedState[node.id] = node.isExpanded
+                }
+            }
+        }
+
+        // 新しい LayerTree を作成（初期レイヤーを作らない）
+        val tree = LayerTree(doc.width, doc.height)
+        tree.clearForImport()  // 初期レイヤーを作らずにクリア
+
+        // displayOrder でソートしてツリー構造を再構築
+        data class ItemInfo(val displayOrder: Int, val isGroup: Boolean, val id: Int, val groupId: Int)
+        val sortedItems = mutableListOf<ItemInfo>()
+
+        for ((gId, group) in doc.layerGroups) {
+            sortedItems.add(ItemInfo(group.displayOrder, true, gId, 0))
+        }
+        for (layer in doc.layers) {
+            sortedItems.add(ItemInfo(layer.displayOrder, false, layer.id, layer.groupId))
+        }
+        sortedItems.sortBy { it.displayOrder }
+
+        // フォルダを事前に作成（参照用）
+        val folderMap = mutableMapOf<Int, Folder>()
+        for (item in sortedItems) {
+            if (item.isGroup) {
+                val group = doc.layerGroups[item.id] ?: continue
+                val wasExpanded = oldExpandedState[item.id] ?: true
+                val folder = Folder(
+                    id = item.id,
+                    name = group.name,
+                    isVisible = group.isVisible,
+                    isLocked = false,
+                    opacity = group.opacity,
+                    blendMode = PixelOps.BLEND_NORMAL,
+                    isExpanded = wasExpanded
+                )
+                folderMap[item.id] = folder
+            }
+        }
+
+        // displayOrder 順にフォルダとレイヤーを混ぜてインポート
+        for (item in sortedItems) {
+            if (item.isGroup) {
+                val folder = folderMap[item.id] ?: continue
+                // フォルダは常にルートに追加（ネストされたフォルダは未対応）
+                tree.importFolder(folder)
+            } else {
+                val layer = doc.layers.find { it.id == item.id } ?: continue
+                val layerData = LayerData(
+                    id = layer.id,
+                    name = layer.name,
+                    surface = layer.content,
+                    isVisible = layer.isVisible,
+                    isLocked = layer.isLocked,
+                    opacity = layer.opacity,
+                    blendMode = layer.blendMode,
+                    isClipToBelow = layer.isClipToBelow,
+                    isAlphaLocked = layer.isAlphaLocked
+                )
+                layerData.sublayer = layer.sublayer
+                layerData.mask = layer.mask
+                layerData.isMaskEnabled = layer.isMaskEnabled
+                layerData.isEditingMask = layer.isEditingMask
+                layerData.textConfig = layer.textConfig
+                layerData.offsetX = layer.offsetX
+                layerData.offsetY = layer.offsetY
+                layerData.scaleX = layer.scaleX
+                layerData.scaleY = layer.scaleY
+                layerData.rotation = layer.rotation
+
+                // 親フォルダに配置
+                val parentId = if (item.groupId > 0) item.groupId else null
+                tree.importLayer(layerData, parentId)
+            }
+        }
+
+        // アクティブレイヤーを設定
+        if (doc.activeLayerId > 0) {
+            tree.setActiveLayer(doc.activeLayerId)
+        }
+
+        // 複数選択状態を同期
+        tree.setSelection(_selectedLayerIds.value)
+
+        _layerTree = tree
+    }
+
+    /**
+     * LayerTree の構造変更を CanvasDocument に反映する。
+     * Phase 3: LayerTree → CanvasDocument 同期
+     */
+    private fun syncCanvasDocumentFromTree() {
+        val doc = _document ?: return
+        val tree = _layerTree ?: return
+
+        // displayOrder カウンタ（ツリー走査順に割り当て）
+        var displayOrder = 0
+
+        // ツリーを深さ優先で走査して displayOrder と groupId を更新
+        fun processNode(node: LayerNode, parentFolderId: Int) {
+            when (node) {
+                is Folder -> {
+                    // フォルダの displayOrder を設定
+                    val groupInfo = doc.layerGroups[node.id]
+                    if (groupInfo != null) {
+                        groupInfo.displayOrder = displayOrder++
+                        groupInfo.name = node.name
+                        groupInfo.isVisible = node.isVisible
+                        groupInfo.opacity = node.opacity
+                    }
+                    // 子ノードを再帰処理
+                    for (child in node.children) {
+                        processNode(child, node.id)
+                    }
+                }
+                is LayerData -> {
+                    // レイヤーの displayOrder と groupId を設定
+                    val layer = doc.layers.find { it.id == node.id }
+                    if (layer != null) {
+                        layer.displayOrder = displayOrder++
+                        layer.groupId = parentFolderId
+                        // 他のプロパティも同期
+                        layer.name = node.name
+                        layer.isVisible = node.isVisible
+                        layer.isLocked = node.isLocked
+                        layer.opacity = node.opacity
+                        layer.blendMode = node.blendMode
+                        layer.isClipToBelow = node.isClipToBelow
+                        layer.isAlphaLocked = node.isAlphaLocked
+                    }
+                }
+            }
+        }
+
+        // ルートレベルのノードを処理
+        for (node in tree.root) {
+            processNode(node, 0)  // ルートレベルは groupId = 0
+        }
+
+        // _layers を displayOrder でソート（描画順序を正しくする）
+        doc.sortLayersByDisplayOrder()
+
+        // アクティブレイヤーを同期
+        doc.setActiveLayer(tree.activeLayerId)
+
+        PaintDebug.d(PaintDebug.Layer) {
+            "[syncCanvasDocumentFromTree] synced ${tree.getAllLayers().size} layers, ${tree.root.count { it is Folder }} folders"
+        }
+    }
+
     private fun updateLayerState() {
         val doc = _document ?: return
+
+        // LayerTree を CanvasDocument から同期
+        syncLayerTree()
+
+        val tree = _layerTree ?: return
+
         // 重い処理を Default ディスパッチャで非同期実行（メインスレッド非ブロック）
         viewModelScope.launch(Dispatchers.Default) {
             val startTime = System.currentTimeMillis()
-            val uiLayers = mutableListOf<UiLayer>()
 
-            // ── レイヤーとグループを displayOrder で統一的にソート ──
-            data class DisplayItem(val displayOrder: Int, val uiLayer: UiLayer)
-            val displayItems = mutableListOf<DisplayItem>()
+            // LayerTree.serializeForUI() を使用して UI 状態を取得
+            val serialized = tree.serializeForUI()
 
-            // グループを変換
-            for ((gId, group) in doc.layerGroups) {
-                displayItems.add(DisplayItem(
-                    displayOrder = group.displayOrder,
-                    uiLayer = UiLayer(
-                        id = -gId,  // グループは負の ID で区別
-                        name = group.name,
-                        opacity = 1f,
-                        blendMode = 0,
-                        isVisible = group.isVisible,
-                        isLocked = false,
-                        isClipToBelow = false,
-                        isActive = false,
-                        isGroup = true  // グループフラグをセット
-                    )
-                ))
+            // Map を UiLayer に変換
+            // 注意: IDは常に正の値。isGroup フラグでフォルダとレイヤーを区別
+            val uiLayers = serialized.map { map ->
+                UiLayer(
+                    id = map["id"] as Int,
+                    name = map["name"] as String,
+                    opacity = (map["opacity"] as Number).toFloat(),
+                    blendMode = map["blendMode"] as Int,
+                    isVisible = map["isVisible"] as Boolean,
+                    isLocked = map["isLocked"] as Boolean,
+                    isClipToBelow = (map["isClipToBelow"] as? Boolean) ?: false,
+                    isActive = map["isActive"] as Boolean,
+                    isAlphaLocked = (map["isAlphaLocked"] as? Boolean) ?: false,
+                    hasMask = (map["hasMask"] as? Boolean) ?: false,
+                    isMaskEnabled = (map["isMaskEnabled"] as? Boolean) ?: false,
+                    isEditingMask = (map["isEditingMask"] as? Boolean) ?: false,
+                    groupId = (map["parentId"] as? Int) ?: 0,
+                    isTextLayer = (map["isTextLayer"] as? Boolean) ?: false,
+                    isGroup = map["isGroup"] as Boolean,
+                    depth = map["depth"] as Int,
+                    isExpanded = (map["isExpanded"] as? Boolean) ?: true
+                )
             }
-
-            // レイヤーを変換
-            for (layer in doc.layers) {
-                displayItems.add(DisplayItem(
-                    displayOrder = layer.displayOrder,
-                    uiLayer = UiLayer(
-                        id = layer.id,
-                        name = layer.name,
-                        opacity = layer.opacity,
-                        blendMode = layer.blendMode,
-                        isVisible = layer.isVisible,
-                        isLocked = layer.isLocked,
-                        isClipToBelow = layer.isClipToBelow,
-                        isActive = layer.id == doc.activeLayerId,
-                        isAlphaLocked = layer.isAlphaLocked,
-                        hasMask = layer.mask != null,
-                        isMaskEnabled = layer.isMaskEnabled,
-                        isEditingMask = layer.isEditingMask,
-                        groupId = layer.groupId,
-                        isTextLayer = layer.textConfig != null,
-                        isGroup = false
-                    )
-                ))
-            }
-
-            // displayOrder でソートして、UiLayer を抽出
-            uiLayers.addAll(displayItems.sortedBy { it.displayOrder }.map { it.uiLayer })
 
             // 処理時間をログに出力
             val elapsedTime = System.currentTimeMillis() - startTime
@@ -1826,6 +2380,45 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * LayerTree から直接 UI 状態を更新する。
+     * Phase 3: LayerTree が既に最新の場合に使用（syncLayerTree をスキップ）
+     */
+    private fun updateLayerStateFromTree() {
+        val tree = _layerTree ?: return
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val serialized = tree.serializeForUI()
+
+            // 注意: IDは常に正の値。isGroup フラグでフォルダとレイヤーを区別
+            val uiLayers = serialized.map { map ->
+                UiLayer(
+                    id = map["id"] as Int,
+                    name = map["name"] as String,
+                    opacity = (map["opacity"] as Number).toFloat(),
+                    blendMode = map["blendMode"] as Int,
+                    isVisible = map["isVisible"] as Boolean,
+                    isLocked = map["isLocked"] as Boolean,
+                    isClipToBelow = (map["isClipToBelow"] as? Boolean) ?: false,
+                    isActive = map["isActive"] as Boolean,
+                    isAlphaLocked = (map["isAlphaLocked"] as? Boolean) ?: false,
+                    hasMask = (map["hasMask"] as? Boolean) ?: false,
+                    isMaskEnabled = (map["isMaskEnabled"] as? Boolean) ?: false,
+                    isEditingMask = (map["isEditingMask"] as? Boolean) ?: false,
+                    groupId = (map["parentId"] as? Int) ?: 0,
+                    isTextLayer = (map["isTextLayer"] as? Boolean) ?: false,
+                    isGroup = map["isGroup"] as Boolean,
+                    depth = map["depth"] as Int,
+                    isExpanded = (map["isExpanded"] as? Boolean) ?: true
+                )
+            }
+
+            withContext(Dispatchers.Main) {
+                _layers.value = uiLayers
+            }
+        }
+    }
+
     private fun updateUndoState() {
         val doc = _document ?: return
         // Undo状態の更新もメインスレッド非ブロック
@@ -1833,6 +2426,28 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
             _canUndo.value = doc.canUndo
             _canRedo.value = doc.canRedo
         }
+    }
+
+    // ── 複数レイヤー選択 (Single Source of Truth) ────────────────
+
+    private val _selectedLayerIds = MutableStateFlow<Set<Int>>(emptySet())
+    val selectedLayerIds: StateFlow<Set<Int>> = _selectedLayerIds.asStateFlow()
+
+    fun setMultiSelection(ids: Set<Int>) {
+        _selectedLayerIds.value = ids
+        _layerTree?.setSelection(ids)
+    }
+
+    fun toggleLayerSelection(id: Int) {
+        val current = _selectedLayerIds.value.toMutableSet()
+        if (current.contains(id)) current.remove(id) else current.add(id)
+        _selectedLayerIds.value = current
+        _layerTree?.toggleSelection(id)
+    }
+
+    fun clearMultiSelection() {
+        _selectedLayerIds.value = emptySet()
+        _layerTree?.clearSelection()
     }
 
     // ── 選択ツール ──────────────────────────────────────────────
@@ -2212,6 +2827,52 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
         hasUnsavedChanges = true; updateUndoState()
     }
 
+    fun applyInvertColors() {
+        val doc = _document ?: return
+        doc.applyInvertColors(doc.activeLayerId)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyMotionBlur(angleDeg: Float, distance: Int) {
+        val doc = _document ?: return
+        doc.applyMotionBlur(doc.activeLayerId, angleDeg, distance)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyLinearGradient(startX: Float, startY: Float, endX: Float, endY: Float, startColor: Int, endColor: Int) {
+        val doc = _document ?: return
+        doc.applyLinearGradient(doc.activeLayerId, startX, startY, endX, endY, startColor, endColor)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    /** 角度ベースの線形グラデーション（キャンバス全体を対象）。 */
+    fun applyLinearGradientAngle(angleDeg: Float, startColor: Int, endColor: Int) {
+        val doc = _document ?: return
+        val w = doc.width.toFloat(); val h = doc.height.toFloat()
+        val rad = Math.toRadians(angleDeg.toDouble()).toFloat()
+        val cx = w / 2; val cy = h / 2
+        val len = (w + h) / 2  // 対角線の半分程度
+        val dx = kotlin.math.cos(rad) * len
+        val dy = kotlin.math.sin(rad) * len
+        doc.applyLinearGradient(doc.activeLayerId, cx - dx, cy - dy, cx + dx, cy + dy, startColor, endColor)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    fun applyRadialGradient(centerX: Float, centerY: Float, radius: Float, startColor: Int, endColor: Int) {
+        val doc = _document ?: return
+        doc.applyRadialGradient(doc.activeLayerId, centerX, centerY, radius, startColor, endColor)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
+    /** キャンバス中心から外周への放射状グラデーション。 */
+    fun applyRadialGradientCenter(startColor: Int, endColor: Int) {
+        val doc = _document ?: return
+        val cx = doc.width / 2f; val cy = doc.height / 2f
+        val radius = kotlin.math.max(doc.width, doc.height) / 2f
+        doc.applyRadialGradient(doc.activeLayerId, cx, cy, radius, startColor, endColor)
+        hasUnsavedChanges = true; updateUndoState()
+    }
+
     fun applyGradientMap(gradientLut: IntArray) {
         val doc = _document ?: return
         doc.applyGradientMap(doc.activeLayerId, gradientLut)
@@ -2220,9 +2881,15 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
 
     // ─── ピクセルコピー変形（Word/Excel風） ────────────────────
 
-    fun startPixelCopy(): Map<String, Int> {
+    /**
+     * ピクセルコピー（浮遊選択層）を開始。
+     * @param layerIds 対象レイヤーID。null の場合はアクティブレイヤーのみ。
+     *                 複数指定で多レイヤー浮遊選択 (Phase 3.5)。
+     */
+    fun startPixelCopy(layerIds: List<Int>? = null): Map<String, Int> {
         val doc = _document ?: return emptyMap()
-        val bounds = doc.startPixelCopy(doc.activeLayerId)
+        val ids = layerIds ?: listOf(doc.activeLayerId)
+        val bounds = doc.startPixelCopy(ids)
         return mapOf(
             "left" to bounds.left,
             "top" to bounds.top,
@@ -2240,5 +2907,27 @@ class PaintViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelPixelCopy() {
         val doc = _document ?: return
         doc.cancelPixelCopy()
+    }
+
+    /**
+     * GL キャンバスのビュー変換を取得。Flutter 側の PixelCopyOverlay で
+     * doc 座標 → スクリーン座標変換に使用。
+     * screenX = centerX + finalScale*(cos*(docX-docW/2) - sin*(docY-docH/2))
+     * screenY = centerY + finalScale*(sin*(docX-docW/2) + cos*(docY-docH/2))
+     *   where finalScale = min(sw/docW, sh/docH) * zoom,
+     *         centerX = sw/2 + panX, centerY = sh/2 + panY
+     */
+    fun getViewTransform(): Map<String, Any> {
+        val doc = _document ?: return emptyMap()
+        return mapOf(
+            "zoom" to _zoom.toDouble(),
+            "panX" to _panX.toDouble(),
+            "panY" to _panY.toDouble(),
+            "rotation" to _rotation.toDouble(),
+            "surfaceWidth" to renderer.surfaceWidth,
+            "surfaceHeight" to renderer.surfaceHeight,
+            "docWidth" to doc.width,
+            "docHeight" to doc.height,
+        )
     }
 }

@@ -27,6 +27,24 @@ data class CanvasPreset(
 )
 
 private val presets = listOf(
+    // 印刷 (350dpi)
+    CanvasPreset("A4 縦 (2894x4093)", 2894, 4093, "印刷 350dpi"),
+    CanvasPreset("A4 横 (4093x2894)", 4093, 2894, "印刷 350dpi"),
+    CanvasPreset("A5 縦 (2039x2894)", 2039, 2894, "印刷 350dpi"),
+    CanvasPreset("A5 横 (2894x2039)", 2894, 2039, "印刷 350dpi"),
+    CanvasPreset("B5 縦 (2508x3541)", 2508, 3541, "印刷 350dpi"),
+    CanvasPreset("はがき (1378x2039)", 1378, 2039, "印刷 350dpi"),
+    // 印刷 (300dpi)
+    CanvasPreset("A4 縦 (2480x3508)", 2480, 3508, "印刷 300dpi"),
+    CanvasPreset("A4 横 (3508x2480)", 3508, 2480, "印刷 300dpi"),
+    CanvasPreset("A5 縦 (1748x2480)", 1748, 2480, "印刷 300dpi"),
+    CanvasPreset("A5 横 (2480x1748)", 2480, 1748, "印刷 300dpi"),
+    CanvasPreset("B5 縦 (2150x3035)", 2150, 3035, "印刷 300dpi"),
+    CanvasPreset("はがき (1181x1748)", 1181, 1748, "印刷 300dpi"),
+    // SNS
+    CanvasPreset("Twitter ヘッダー (1500x500)", 1500, 500, "SNS"),
+    CanvasPreset("Instagram (1080x1080)", 1080, 1080, "SNS"),
+    CanvasPreset("YouTube サムネ (1280x720)", 1280, 720, "SNS"),
     // スクリーンサイズ
     CanvasPreset("HD (1920x1080)", 1920, 1080, "スクリーン"),
     CanvasPreset("2K (2560x1440)", 2560, 1440, "スクリーン"),
@@ -36,24 +54,6 @@ private val presets = listOf(
     CanvasPreset("1024 x 1024", 1024, 1024, "正方形"),
     CanvasPreset("2048 x 2048", 2048, 2048, "正方形"),
     CanvasPreset("4096 x 4096", 4096, 4096, "正方形"),
-    // 印刷 (300dpi)
-    CanvasPreset("A4 縦 (2480x3508)", 2480, 3508, "印刷 300dpi"),
-    CanvasPreset("A4 横 (3508x2480)", 3508, 2480, "印刷 300dpi"),
-    CanvasPreset("A5 縦 (1748x2480)", 1748, 2480, "印刷 300dpi"),
-    CanvasPreset("A5 横 (2480x1748)", 2480, 1748, "印刷 300dpi"),
-    CanvasPreset("B5 縦 (2150x3035)", 2150, 3035, "印刷 300dpi"),
-    CanvasPreset("はがき (1181x1748)", 1181, 1748, "印刷 300dpi"),
-    // 印刷 (350dpi)
-    CanvasPreset("A4 縦 (2894x4093)", 2894, 4093, "印刷 350dpi"),
-    CanvasPreset("A4 横 (4093x2894)", 4093, 2894, "印刷 350dpi"),
-    CanvasPreset("A5 縦 (2039x2894)", 2039, 2894, "印刷 350dpi"),
-    CanvasPreset("A5 横 (2894x2039)", 2894, 2039, "印刷 350dpi"),
-    CanvasPreset("B5 縦 (2508x3541)", 2508, 3541, "印刷 350dpi"),
-    CanvasPreset("はがき (1378x2039)", 1378, 2039, "印刷 350dpi"),
-    // SNS
-    CanvasPreset("Twitter ヘッダー (1500x500)", 1500, 500, "SNS"),
-    CanvasPreset("Instagram (1080x1080)", 1080, 1080, "SNS"),
-    CanvasPreset("YouTube サムネ (1280x720)", 1280, 720, "SNS"),
 )
 
 @Composable

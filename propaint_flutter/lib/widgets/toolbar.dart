@@ -135,20 +135,17 @@ class PaintToolbar extends StatelessWidget {
             tooltip: '選択',
           ),
 
-          // 図形・テキスト
+          // 塗りつぶし（バケツ）
           _ToolbarIcon(
-            icon: Icons.shape_line_rounded,
-            onPressed: () => onTogglePanel(PanelType.shapeText),
-            isActive: openPanel == PanelType.shapeText,
-            tooltip: '図形・テキスト',
-          ),
-
-          // 変形
-          _ToolbarIcon(
-            icon: Icons.transform_rounded,
-            onPressed: () => onTogglePanel(PanelType.transform),
-            isActive: openPanel == PanelType.transform,
-            tooltip: '変形',
+            icon: Icons.format_color_fill_rounded,
+            onPressed: () {
+              if (state.toolMode != 'FloodFill') {
+                channel.setToolMode('FloodFill');
+              }
+              onTogglePanel(PanelType.floodFill);
+            },
+            isActive: state.toolMode == 'FloodFill' || openPanel == PanelType.floodFill,
+            tooltip: '塗りつぶし',
           ),
 
           // フィルター
@@ -166,6 +163,7 @@ class PaintToolbar extends StatelessWidget {
   List<Widget> _buildBrushIcons() {
     const brushDefs = <(String, IconData, String)>[
       ('Pencil', Icons.edit_rounded, '鉛筆'),
+      ('Pen', Icons.create_rounded, 'ペン'),
       ('Fude', Icons.brush_rounded, '筆'),
       ('Watercolor', Icons.water_drop_rounded, '水彩'),
       ('Airbrush', Icons.blur_on_rounded, 'エアブラシ'),
